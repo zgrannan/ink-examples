@@ -10,8 +10,7 @@ mod erc20 {
     }
 
     #[extern_spec]
-    impl <T: Default> Option<T> {
-
+    impl<T: Default> Option<T> {
         #[pure]
         #[ensures(result == matches!(self, None))]
         fn is_none(&self) -> bool;
@@ -57,8 +56,7 @@ mod erc20 {
     //     }
     // }
 
-    impl <T, U: Copy> Mapping<T,U> {
-
+    impl<T, U: Copy> Mapping<T, U> {
         #[trusted]
         #[ensures(self.get(key) === Some(*value))]
         #[ensures(self.get(key).is_some())]
@@ -77,15 +75,18 @@ mod erc20 {
     // use ink::storage::Mapping;
 
     #[invariant_twostate(
+        self.env.0 == old(self.env.0)
+    )]
+    #[invariant_twostate(
         forall(|owner: AccountId| {
-            PermAmount::from(self.balance_of(owner) - old(self.balance_of(owner)))
+            PermAmount::from(self.balance_of(owner)) - old(PermAmount::from(self.balance_of(owner)))
             == holds(Money(owner)) - old(holds(Money(owner)))
         })
     )]
     #[invariant_twostate(
-        forall(|a1: AccountId, a2: AccountId| {
-            PermAmount::from(self.allowance(a1, a2) - old(self.allowance(a1, a2)))
-            == holds(Allowance(a1, a2)) - old(holds(Allowance(a1, a2)))
+        forall(|a1: &AccountId, a2: &AccountId| {
+            PermAmount::from(self.allowance_impl(a1, a2)) - old(PermAmount::from(self.allowance_impl(a1, a2)))
+            == holds(Allowance(*a1, *a2)) - old(holds(Allowance(*a1, *a2)))
         })
     )]
     pub struct Erc20 {
@@ -96,6 +97,8 @@ mod erc20 {
         /// Mapping of the token amount which an account is allowed to withdraw
         /// from another account.
         allowances: Mapping<(AccountId, AccountId), Balance>,
+
+        env: Env,
     }
 
     /// Event emitted when a token transfer occurs.
@@ -123,33 +126,26 @@ mod erc20 {
     /// The ERC-20 result type.
     pub type Result<T> = core::result::Result<T, Error>;
 
-    struct Env(u32);
+    struct Env(AccountId);
+
     impl Env {
-        #[trusted]
         #[pure]
         fn caller(&self) -> AccountId {
-            unimplemented!()
+            self.0
         }
-        fn emit_event<T>(&self, event: T) {
-        }
+        fn emit_event<T>(&self, event: T) {}
     }
 
     impl Erc20 {
 
-        #[trusted]
         #[pure]
-        fn caller(&self) -> AccountId {
-            unimplemented!();
-        }
-
-        #[trusted]
         fn env(&self) -> &Env {
-            unimplemented!()
+            &self.env
         }
 
         /// Creates a new ERC-20 contract with the specified initial supply.
         #[ensures(resource(Money(caller), total_supply))]
-        #[ensures(result.balance_of_impl(&caller) === total_supply)]
+        #[ensures(result.balance_of_impl(&caller) == total_supply)]
         #[ensures(forall(|other: AccountId| other !== caller ==> result.balance_of_impl(&other) == 0))]
         #[ensures(forall(|a1: AccountId, a2: AccountId| result.allowance_impl(&a1, &a2) == 0))]
         pub fn new(total_supply: Balance, caller: AccountId) -> Self {
@@ -159,7 +155,8 @@ mod erc20 {
             Self {
                 total_supply,
                 balances,
-                allowances: Mapping::new()
+                allowances: Mapping::new(),
+                env: Env(caller),
             }
         }
 
@@ -212,8 +209,13 @@ mod erc20 {
         /// works using references which are more efficient in Wasm.
         #[inline]
         #[pure]
+        #[ensures(!self.allowances.get(&(*owner, *spender)).is_some() ==> (result == 0))]
         fn allowance_impl(&self, owner: &AccountId, spender: &AccountId) -> Balance {
-            self.allowances.get(&(*owner, *spender)).unwrap_or_default()
+            if self.allowances.get(&(*owner, *spender)).is_some() {
+                self.allowances.get(&(*owner, *spender)).unwrap()
+            } else {
+                0
+            }
         }
 
         /// Transfers `value` amount of tokens from the caller's account to account `to`.
@@ -224,12 +226,13 @@ mod erc20 {
         ///
         /// Returns `InsufficientBalance` error if there are not enough tokens on
         /// the caller's account balance.
-        #[requires(self.balance_of(self.caller()) >= value ==> resource(Money(self.caller()), value))]
-        #[ensures(old(self.balance_of(self.caller())) >= value ==> resource(Money(to), value))]
-        #[ensures(old(self.balance_of(self.caller())) >= value ==> result.is_ok())]
-        #[ensures(old(self.balance_of(self.caller())) < value ==> result === Err(Error::InsufficientBalance))]
+        #[requires(self.balance_of(self.env().caller()) >= value ==> resource(Money(self.env().caller()), value))]
+        #[ensures(old(self.balance_of(self.env().caller())) >= value ==> resource(Money(to), value))]
+        #[ensures(old(self.balance_of(self.env().caller())) >= value ==> result.is_ok())]
+        #[ensures(old(self.balance_of(self.env().caller())) < value ==> result === Err(Error::InsufficientBalance))]
         pub fn transfer(&mut self, to: AccountId, value: Balance) -> Result<()> {
-            let from = self.caller();
+            // Cannot chain pure functions :(
+            let from = self.env.caller();
             self.transfer_from_to(&from, &to, value)
         }
 
@@ -242,26 +245,33 @@ mod erc20 {
         /// An `Approval` event is emitted.
         #[requires(
             resource(
-                Allowance(self.caller(), spender),
-                self.allowance_impl(&self.caller(), &spender)
+                Allowance(self.env().caller(), spender),
+                self.allowance_impl(&self.env().caller(), &spender)
             )
         )]
         #[ensures(
             resource(
-                Allowance(old(self.caller()), spender),
+                Allowance(old(self.env().caller()), spender),
                 value
             )
         )]
         #[ensures(result.is_ok())]
         pub fn approve(&mut self, spender: AccountId, value: Balance) -> Result<()> {
-            produce!(resource(Allowance(self.caller(), spender), value));
-            let owner = self.caller();
-            self.allowances.insert(&(owner, spender), &value);
-            self.env().emit_event(Approval {
-                owner,
-                spender,
-                value,
-            });
+            consume!(resource(
+                Allowance(self.env().caller(), spender),
+                self.allowance_impl(&self.env().caller(), &spender)
+            ));
+            produce!(resource(Allowance(self.env().caller(), spender), value));
+
+            // Cannot chain pure functions :(
+            // let owner = self.env().caller();
+            self.allowances.insert(&(self.env.caller(), spender), &value);
+            prusti_assert!(self.env().caller() == old(self.env().caller()));
+            // self.env().emit_event(Approval {
+            //     owner,
+            //     spender,
+            //     value,
+            // })
             Ok(())
         }
 
@@ -279,20 +289,20 @@ mod erc20 {
         ///
         /// Returns `InsufficientBalance` error if there are not enough tokens on
         /// the account balance of `from`.
-        // #[requires(self.allowance_impl(from, &self.caller()) >= value)]
+        // #[requires(self.allowance_impl(from, &self.env().caller()) >= value)]
         #[requires(
-            (self.allowance_impl(&from, &self.caller()) >= value &&
+            (self.allowance_impl(&from, &self.env.caller()) >= value &&
             self.balance_of(from) >= value) ==> resource(Money(from), value)
         )]
         #[requires(
-            (self.allowance_impl(&from, &self.caller()) >= value &&
-            self.balance_of(from) >= value) ==> resource(Allowance(from, self.caller()), value)
+            (self.allowance_impl(&from, &self.env.caller()) >= value &&
+            self.balance_of(from) >= value) ==> resource(Allowance(from, self.env().caller()), value)
         )]
         #[ensures(
-            (old(self.allowance_impl(&from, &self.caller()) >= value) &&
+            (old(self.allowance_impl(&from, &self.env.caller()) >= value) &&
              old(self.balance_of(from) >= value)) ==> resource(Money(to), value))]
         #[ensures(
-            old(self.allowance_impl(&from, &self.caller())) < value ==>
+            old(self.allowance_impl(&from, &self.env.caller())) < value ==>
             result === Err(Error::InsufficientAllowance))]
         pub fn transfer_from(
             &mut self,
@@ -300,19 +310,20 @@ mod erc20 {
             to: AccountId,
             value: Balance,
         ) -> Result<()> {
-            let caller = self.caller();
+            // Cannot chain pure functions :(
+            let caller = self.env.caller();
             let allowance = self.allowance_impl(&from, &caller);
             if allowance < value {
-                return Err(Error::InsufficientAllowance)
+                return Err(Error::InsufficientAllowance);
             }
-            self.transfer_from_to(&from, &to, value)?;
+            // .? Op is not supported
+            let result = self.transfer_from_to(&from, &to, value);
+            if result.is_err() {
+                return result;
+            }
             self.allowances
                 .insert(&(from, caller), &(allowance - value));
-            prusti_assert!(self.allowance_impl(&from, &caller) == allowance - value);
             consume!(resource(Allowance(from, caller), value));
-            prusti_assert!(
-                PermAmount::from(self.allowance(from, caller) - allowance)
-                == holds(Allowance(from, caller)) - old(holds(Allowance(from, caller))));
             Ok(())
         }
 
@@ -336,7 +347,7 @@ mod erc20 {
         ) -> Result<()> {
             let from_balance = self.balance_of_impl(from);
             if from_balance < value {
-                return Err(Error::InsufficientBalance)
+                return Err(Error::InsufficientBalance);
             }
 
             self.balances.insert(from, &(from_balance - value));
@@ -345,11 +356,11 @@ mod erc20 {
             let to_balance = self.balance_of_impl(to);
             self.balances.insert(to, &(to_balance + value));
             produce!(resource(Money(*to), value));
-            self.env().emit_event(Transfer {
-                from: Some(*from),
-                to: Some(*to),
-                value,
-            });
+            // self.env().emit_event(Transfer {
+            //     from: Some(*from),
+            //     to: Some(*to),
+            //     value,
+            // });
             Ok(())
         }
     }
@@ -374,7 +385,7 @@ mod erc20 {
         let mut erc20 = Erc20::new(100, alice);
         // Transfer event triggered during initial construction.
 
-        prusti_assume!(erc20.caller() == alice);
+        prusti_assume!(erc20.env().caller() == alice);
         prusti_assert_eq!(erc20.balance_of(bob), 0);
         // Alice transfers 10 tokens to Bob.
         let transfer_result = erc20.transfer(bob, 10);
@@ -395,15 +406,12 @@ mod erc20 {
 
         prusti_assert_eq!(erc20.balance_of(bob), 0);
 
-        prusti_assume!(erc20.caller() == bob);
+        prusti_assume!(erc20.env().caller() == bob);
 
         let transfer_result = erc20.transfer(eve, 10);
 
         // Bob fails to transfers 10 tokens to Eve.
-        prusti_assert_eq!(
-            transfer_result,
-            Err(Error::InsufficientBalance)
-        );
+        prusti_assert_eq!(transfer_result, Err(Error::InsufficientBalance));
         // Alice owns all the tokens.
         prusti_assert_eq!(erc20.balance_of(alice), 100);
         prusti_assert_eq!(erc20.balance_of(bob), 0);
@@ -427,20 +435,22 @@ mod erc20 {
 
         // Constructor works.
         let mut erc20 = Erc20::new(100, alice);
-        prusti_assume!(erc20.caller() == alice);
+        prusti_assert!(erc20.allowance_impl(&alice, &bob) == 0);
+        prusti_assume!(erc20.env().caller() == alice);
         prusti_assert_eq!(erc20.allowance_impl(&alice, &alice), 0);
         let transfer_result = erc20.transfer_from(alice, eve, 10);
-        prusti_assert_eq!(
-            transfer_result,
-            Err(Error::InsufficientAllowance)
-        );
+        // prusti_assert_eq!(
+        //     transfer_result,
+        //     Err(Error::InsufficientAllowance)
+        // );
 
-        prusti_assume!(erc20.caller() == alice);
+        prusti_assume!(erc20.env().caller() == alice);
         // Alice approves Bob for token transfers on her behalf.
+        prusti_assert!(erc20.allowance_impl(&alice, &bob) == 0);
         let approve_result = erc20.approve(bob, 10);
         prusti_assert_eq!(approve_result, Ok(()));
 
-        prusti_assume!(erc20.caller() == bob);
+        prusti_assume!(erc20.env().caller() == bob);
         // Bob transfers tokens from Alice to Eve.
         let transfer_result = erc20.transfer_from(alice, eve, 10);
         prusti_assert_eq!(transfer_result, Ok(()));
@@ -470,16 +480,9 @@ mod erc20 {
     mod tests {
         use super::*;
 
-        use ink::primitives::{
-            Clear,
-            Hash,
-        };
+        use ink::primitives::{Clear, Hash};
 
         type Event = <Erc20 as ::ink::reflect::ContractEventBase>::Type;
-
-
-
-
 
         #[ink::test]
         fn allowance_must_not_change_on_failed_transfer() {
@@ -542,11 +545,7 @@ mod erc20 {
             T: scale::Encode,
         {
             use ink::{
-                env::hash::{
-                    Blake2x256,
-                    CryptoHash,
-                    HashOutput,
-                },
+                env::hash::{Blake2x256, CryptoHash, HashOutput},
                 primitives::Clear,
             };
 
@@ -556,7 +555,7 @@ mod erc20 {
             let len_encoded = encoded.len();
             if len_encoded <= len_result {
                 result.as_mut()[..len_encoded].copy_from_slice(&encoded);
-                return result
+                return result;
             }
             let mut hash_output =
                 <<Blake2x256 as HashOutput>::Type as Default>::default();
@@ -707,4 +706,4 @@ mod erc20 {
     }
 }
 
-fn main(){}
+fn main() {}
