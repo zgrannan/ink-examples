@@ -169,18 +169,12 @@ mod erc721 {
             self.balance_of(a) > 0
         , triggers=[(self.owner_of(t), self.balance_of(a))])
     )]
-    #[invariant(
+    #[invariant_twostate(
         forall(|t: TokenId|
-            holds(TokenApproval(t)) - old(holds(TokenApproval(t))) == PermAmount::from(1) ==>
-                self.get_approved(t).is_some()
-        )
+            (holds(TokenApproval(t)) == PermAmount::from(0) &&
+            old(holds(TokenApproval(t))) == PermAmount::from(0)) ==>
+            self.get_approved(t) === old(self.get_approved(t)))
     )]
-    // #[invariant_twostate(
-    //     forall(|t: TokenId|
-    //         (holds(OwnershipOf(t)) == PermAmount::from(0) &&
-    //         old(holds(OwnershipOf(t))) == PermAmount::from(0)) ==>
-    //         self.owner_of(t) === old(self.owner_of(t)), triggers=[(self.owner_of(t))])
-    // )]
     pub struct Erc721 {
         /// Mapping from token to owner.
         token_owner: Mapping<TokenId, AccountId>,
@@ -277,15 +271,20 @@ mod erc721 {
         }
 
         /// Approves the account to transfer the specified token on behalf of the caller.
+        #[ensures(result == Ok(()) ==> resource(TokenApproval(id), 1))]
         pub fn approve(&mut self, to: AccountId, id: TokenId) -> Result<(), Error> {
-            self.approve_for(to, id)?;
-            Ok(())
+            self.approve_for(to, id)
         }
 
         /// Transfers the token from the caller to the given destination.
         #[requires((self.token_owner.get(id) == Some(self.env.caller())) ==> resource(OwnershipOf(id), 1))]
-        #[requires((self.token_owner.get(id) == Some(self.env.caller())) ==> resource(OwnedTokens(
+        #[requires(self.token_owner.get(id) == Some(self.env.caller()) ==> resource(OwnedTokens(
             self.env.caller()
+        ), 1))]
+        #[requires(
+            (self.token_owner.get(id) == Some(self.env.caller()) &&
+            self.get_approved(id) != None) ==> resource(TokenApproval(
+            id
         ), 1))]
         #[ensures(result == Ok(()) ==> resource(OwnershipOf(id), 1))]
         #[ensures(result == Ok(()) ==> resource(OwnedTokens(to), 1))]
@@ -323,6 +322,12 @@ mod erc721 {
         #[requires(self.token_owner.get(id) == Some(from) && self.can_transfer(self.env.caller(), id) ==> resource(OwnershipOf(id), 1))]
         #[requires(self.token_owner.get(id) == Some(from) && self.can_transfer(self.env.caller(), id) ==> resource(OwnedTokens(
             from
+        ), 1))]
+        #[requires(
+            (self.owner_of(id) == Some(from) &&
+            self.can_transfer(self.env.caller(), id) &&
+            self.get_approved(id) != None) ==> resource(TokenApproval(
+            id
         ), 1))]
         #[ensures(result == Ok(()) ==> resource(OwnershipOf(id), 1))]
         #[ensures(result == Ok(()) ==> resource(OwnedTokens(to), 1))]
@@ -431,6 +436,12 @@ mod erc721 {
         #[requires(
             (self.owner_of(id) == Some(from) && self.can_transfer(self.env.caller(), id)) ==> resource(OwnedTokens(
             from
+        ), 1))]
+        #[requires(
+            (self.owner_of(id) == Some(from) &&
+            self.can_transfer(self.env.caller(), id) &&
+            self.get_approved(id) != None) ==> resource(TokenApproval(
+            id
         ), 1))]
         #[ensures(result == Ok(()) ==> resource(OwnershipOf(id), 1))]
         #[ensures(result == Ok(()) ==> resource(OwnedTokens(to), 1))]
@@ -574,9 +585,15 @@ mod erc721 {
 
         /// Approve the passed `AccountId` to transfer the specified token on behalf of
         /// the message's sender.
+        #[ensures(result == Ok(()) ==> resource(TokenApproval(id), 1))]
         fn approve_for(&mut self, to: AccountId, id: TokenId) -> Result<(), Error> {
             let caller = self.env.caller();
-            let owner = self.owner_of(id).ok_or(Error::TokenNotFound)?;
+            let owner = match self.owner_of(id) {
+                Some(owner) => owner,
+                None => {
+                    return Err(Error::TokenNotFound);
+                }
+            };
             if !(owner == caller || self.approved_for_all(owner, caller)) {
                 return Err(Error::NotAllowed)
             };
@@ -590,6 +607,7 @@ mod erc721 {
             } else {
                 self.token_approvals.insert(id, to);
             }
+            produce!(resource(TokenApproval(id), 1));
 
             // TODO
             // self.env.emit_event(Approval {
@@ -602,6 +620,7 @@ mod erc721 {
         }
 
         /// Removes existing approval from token `id`.
+        #[requires(self.get_approved(id) != None ==> resource(TokenApproval(id), 1))]
         fn clear_approval(&mut self, id: TokenId) {
             self.token_approvals.remove(id);
         }
@@ -863,4 +882,5 @@ mod erc721 {
     }
 }
 
+#[allow(dead_code)]
 fn main() {}
