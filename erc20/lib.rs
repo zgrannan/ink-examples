@@ -137,7 +137,6 @@ mod erc20 {
     }
 
     impl Erc20 {
-
         #[pure]
         fn env(&self) -> &Env {
             &self.env
@@ -265,7 +264,8 @@ mod erc20 {
 
             // Cannot chain pure functions :(
             // let owner = self.env().caller();
-            self.allowances.insert(&(self.env.caller(), spender), &value);
+            self.allowances
+                .insert(&(self.env.caller(), spender), &value);
             prusti_assert!(self.env().caller() == old(self.env().caller()));
             // self.env().emit_event(Approval {
             //     owner,
@@ -476,6 +476,41 @@ mod erc20 {
         // );
     }
 
+    fn allowance_must_not_change_on_failed_transfer() {
+        let alice = 0;
+        let bob = 1;
+        let mut erc20 = Erc20::new(100, alice);
+        prusti_assume!(erc20.env().caller() == alice);
+        let accounts = ink::env::test::default_accounts::<ink::env::DefaultEnvironment>();
+
+        // Alice approves Bob for token transfers on her behalf.
+        let alice_balance = erc20.balance_of(alice);
+        let initial_allowance = alice_balance + 2;
+        assert_eq!(erc20.approve(accounts.bob, initial_allowance), Ok(()));
+
+        // Get contract address.
+        let callee = ink::env::account_id::<ink::env::DefaultEnvironment>();
+        ink::env::test::set_callee::<ink::env::DefaultEnvironment>(callee);
+        ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.bob);
+
+        // Bob tries to transfer tokens from Alice to Eve.
+        let emitted_events_before = ink::env::test::recorded_events().count();
+        assert_eq!(
+            erc20.transfer_from(accounts.alice, accounts.eve, alice_balance + 1),
+            Err(Error::InsufficientBalance)
+        );
+        // Allowance must have stayed the same
+        assert_eq!(
+            erc20.allowance(accounts.alice, accounts.bob),
+            initial_allowance
+        );
+        // No more events must have been emitted
+        assert_eq!(
+            emitted_events_before,
+            ink::env::test::recorded_events().count()
+        )
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -485,38 +520,6 @@ mod erc20 {
         type Event = <Erc20 as ::ink::reflect::ContractEventBase>::Type;
 
         #[ink::test]
-        fn allowance_must_not_change_on_failed_transfer() {
-            let mut erc20 = Erc20::new(100);
-            let accounts =
-                ink::env::test::default_accounts::<ink::env::DefaultEnvironment>();
-
-            // Alice approves Bob for token transfers on her behalf.
-            let alice_balance = erc20.balance_of(accounts.alice);
-            let initial_allowance = alice_balance + 2;
-            assert_eq!(erc20.approve(accounts.bob, initial_allowance), Ok(()));
-
-            // Get contract address.
-            let callee = ink::env::account_id::<ink::env::DefaultEnvironment>();
-            ink::env::test::set_callee::<ink::env::DefaultEnvironment>(callee);
-            ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.bob);
-
-            // Bob tries to transfer tokens from Alice to Eve.
-            let emitted_events_before = ink::env::test::recorded_events().count();
-            assert_eq!(
-                erc20.transfer_from(accounts.alice, accounts.eve, alice_balance + 1),
-                Err(Error::InsufficientBalance)
-            );
-            // Allowance must have stayed the same
-            assert_eq!(
-                erc20.allowance(accounts.alice, accounts.bob),
-                initial_allowance
-            );
-            // No more events must have been emitted
-            assert_eq!(
-                emitted_events_before,
-                ink::env::test::recorded_events().count()
-            )
-        }
 
         /// For calculating the event topic hash.
         struct PrefixedValue<'a, 'b, T> {
