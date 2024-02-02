@@ -63,6 +63,9 @@ mod erc721 {
     #[resource_kind]
     struct TokenApproval(TokenId);
 
+    #[resource_kind]
+    struct AccountApproval(AccountId, AccountId);
+
     #[extern_spec]
     impl<T: Default> Option<T> {
         #[pure]
@@ -175,6 +178,12 @@ mod erc721 {
             old(holds(TokenApproval(t))) == PermAmount::from(0)) ==>
             self.get_approved(t) === old(self.get_approved(t)))
     )]
+    #[invariant_twostate(
+        forall(|a1: AccountId, a2: AccountId|
+            (holds(AccountApproval(a1, a2)) == PermAmount::from(0) &&
+            old(holds(AccountApproval(a1, a2))) == PermAmount::from(0)) ==>
+            self.approved_for_all(a1, a2) === old(self.approved_for_all(a1, a2)))
+    )]
     pub struct Erc721 {
         /// Mapping from token to owner.
         token_owner: Mapping<TokenId, AccountId>,
@@ -261,13 +270,13 @@ mod erc721 {
         }
 
         /// Approves or disapproves the operator for all tokens of the caller.
+        #[requires(to != self.env.caller() ==> resource(AccountApproval(self.env.caller(), to), 1))]
         pub fn set_approval_for_all(
             &mut self,
             to: AccountId,
             approved: bool,
         ) -> Result<(), Error> {
-            self.approve_for_all(to, approved)?;
-            Ok(())
+            self.approve_for_all(to, approved)
         }
 
         /// Approves the account to transfer the specified token on behalf of the caller.
@@ -559,6 +568,7 @@ mod erc721 {
         }
 
         /// Approves or disapproves the operator to transfer all tokens of the caller.
+        #[requires(to != self.env.caller() ==> resource(AccountApproval(self.env.caller(), to), 1))]
         fn approve_for_all(
             &mut self,
             to: AccountId,
