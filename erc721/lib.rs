@@ -49,7 +49,7 @@
 //!
 //! Tokens can be destroyed by burning them. Only the token owner is allowed to burn a
 //! token.
-
+#[allow(dead_code, unused_variables, unused_comparisons)]
 mod erc721 {
 
     use prusti_contracts::*;
@@ -61,7 +61,7 @@ mod erc721 {
     struct OwnershipOf(TokenId);
 
     #[resource_kind]
-    struct ApprovalFor(TokenId);
+    struct TokenApproval(TokenId);
 
     #[extern_spec]
     impl<T: Default> Option<T> {
@@ -169,6 +169,18 @@ mod erc721 {
             self.balance_of(a) > 0
         , triggers=[(self.owner_of(t), self.balance_of(a))])
     )]
+    #[invariant(
+        forall(|t: TokenId|
+            holds(TokenApproval(t)) - old(holds(TokenApproval(t))) == PermAmount::from(1) ==>
+                self.get_approved(t).is_some()
+        )
+    )]
+    // #[invariant_twostate(
+    //     forall(|t: TokenId|
+    //         (holds(OwnershipOf(t)) == PermAmount::from(0) &&
+    //         old(holds(OwnershipOf(t))) == PermAmount::from(0)) ==>
+    //         self.owner_of(t) === old(self.owner_of(t)), triggers=[(self.owner_of(t))])
+    // )]
     pub struct Erc721 {
         /// Mapping from token to owner.
         token_owner: Mapping<TokenId, AccountId>,
@@ -238,11 +250,13 @@ mod erc721 {
 
         /// Returns the owner of the token.
         #[pure]
+        #[ensures(matches!(result, Some(_)) ==> self.token_exists(id))]
         pub fn owner_of(&self, id: TokenId) -> Option<AccountId> {
             self.token_owner.get(id)
         }
 
         /// Returns the approved account ID for this token if any.
+        #[pure]
         pub fn get_approved(&self, id: TokenId) -> Option<AccountId> {
             self.token_approvals.get(id)
         }
@@ -269,9 +283,9 @@ mod erc721 {
         }
 
         /// Transfers the token from the caller to the given destination.
-        #[requires((self.token_exists(id) && self.approved_or_owner(self.env.caller(), id)) ==> resource(OwnershipOf(id), 1))]
-        #[requires((self.token_exists(id) && self.approved_or_owner(self.env.caller(), id)) ==> resource(OwnedTokens(
-            self.token_owner.get(id).unwrap()
+        #[requires((self.token_owner.get(id) == Some(self.env.caller())) ==> resource(OwnershipOf(id), 1))]
+        #[requires((self.token_owner.get(id) == Some(self.env.caller())) ==> resource(OwnedTokens(
+            self.env.caller()
         ), 1))]
         #[ensures(result == Ok(()) ==> resource(OwnershipOf(id), 1))]
         #[ensures(result == Ok(()) ==> resource(OwnedTokens(to), 1))]
@@ -281,6 +295,11 @@ mod erc721 {
             id: TokenId,
         ) -> Result<(), Error> {
             let caller = self.env.caller();
+            if {
+                self.token_owner.get(id) == Some(caller)
+            } {
+                prusti_assert!(self.can_transfer(caller, id));
+            }
             self.transfer_token_from(caller, to, id)
         }
 
@@ -301,9 +320,9 @@ mod erc721 {
         }
 
         /// Transfer approved or owned token.
-        #[requires(self.can_transfer(self.env.caller(), id) ==> resource(OwnershipOf(id), 1))]
-        #[requires(self.can_transfer(self.env.caller(), id) ==> resource(OwnedTokens(
-            self.token_owner.get(id).unwrap()
+        #[requires(self.token_owner.get(id) == Some(from) && self.can_transfer(self.env.caller(), id) ==> resource(OwnershipOf(id), 1))]
+        #[requires(self.token_owner.get(id) == Some(from) && self.can_transfer(self.env.caller(), id) ==> resource(OwnedTokens(
+            from
         ), 1))]
         #[ensures(result == Ok(()) ==> resource(OwnershipOf(id), 1))]
         #[ensures(result == Ok(()) ==> resource(OwnedTokens(to), 1))]
@@ -387,18 +406,6 @@ mod erc721 {
 
             owned_tokens_count.insert(caller, count);
             token_owner.remove(id);
-            prusti_assert!(self.balance_of(caller) == old(self.balance_of(self.env.caller())) - 1);
-            prusti_assert!(self.owner_of(id) === None);
-            prusti_assert!(
-                forall(|t: TokenId| t != id ==>
-                    self.owner_of(t) == old(self.owner_of(t))
-                )
-            );
-            prusti_assert!(
-                forall(|a: AccountId| a != caller ==>
-                    self.balance_of(a) == old(self.balance_of(a))
-                )
-            );
 
             // Unused but required for triggers
             let owner_orig = self.owner_of(id);
@@ -408,14 +415,6 @@ mod erc721 {
         forall(|a: AccountId, t: TokenId|
         self.owner_of(t) === Some(a) ==> self.balance_of(a) > 0
         , triggers=[(self.owner_of(t), self.balance_of(a))]));
-            // prusti_assert!(
-            //     forall(|a: AccountId, t: TokenId|
-            //         if(self.owner_of(t) === Some(a)) {
-            //             self.balance_of(a) > 0
-            //         } else {
-            //             true
-            //         }, triggers=[(self.owner_of(t), self.balance_of(a))])
-            // );
 
             // TODO
             // self.env.emit_event(Transfer {
@@ -427,10 +426,11 @@ mod erc721 {
             Ok(())
         }
 
-        /// Transfers token `id` `from` the sender to the `to` `AccountId`.
-        #[requires(self.token_exists(id) ==> self.approved_or_owner(self.env.caller(), id) ==> resource(OwnershipOf(id), 1))]
-        #[requires(self.token_exists(id) ==> self.approved_or_owner(self.env.caller(), id) ==> resource(OwnedTokens(
-            self.token_owner.get(id).unwrap()
+        #[requires(
+            (self.owner_of(id) == Some(from) && self.can_transfer(self.env.caller(), id)) ==> resource(OwnershipOf(id), 1))]
+        #[requires(
+            (self.owner_of(id) == Some(from) && self.can_transfer(self.env.caller(), id)) ==> resource(OwnedTokens(
+            from
         ), 1))]
         #[ensures(result == Ok(()) ==> resource(OwnershipOf(id), 1))]
         #[ensures(result == Ok(()) ==> resource(OwnedTokens(to), 1))]
@@ -447,19 +447,19 @@ mod erc721 {
             if !self.approved_or_owner(caller, id) {
                 return Err(Error::NotApproved);
             };
-            prusti_assume!(false);
+            if self.token_owner.get(id) != Some(from) {
+                return Err(Error::NotOwner);
+            }
+            prusti_assert!(self.can_transfer(caller, id));
             self.clear_approval(id);
             let r = self.remove_token_from(from, id);
             if !matches!(r, Ok(_)) {
-                prusti_assume!(false);
                 return r;
             }
             let r = self.add_token_to(to, id);
             if !matches!(r, Ok(_)) {
-                prusti_assume!(false);
                 return r;
             }
-            prusti_assume!(false);
 
             // TODO
             // self.env.emit_event(Transfer {
@@ -622,15 +622,15 @@ mod erc721 {
         /// or it has been approved on behalf of the token `id` owner.
         #[pure]
         #[requires(0 <= id)] // WHY???
-        #[requires(self.token_exists(id))]
+        #[requires(matches!(self.owner_of(id), Some(_)))]
         fn approved_or_owner(&self, from: AccountId, id: TokenId) -> bool {
             let owner = self.owner_of(id);
-                (Some(from) == owner
+                Some(from) == owner
                     || Some(from) == self.token_approvals.get(id)
                     || self.approved_for_all(
                         owner.unwrap(),
                         from,
-                    ))
+                    )
         }
 
         /// Returns true if token `id` exists or false if it does not.
