@@ -133,8 +133,12 @@ mod erc721 {
         }
 
         #[trusted]
+        #[ensures(matches!(self.get(key), None))]
         #[ensures(self.get(key) === None)]
         #[ensures(forall(|k : T| k !== key ==> self.get(k) === old(self.get(k))))]
+        #[ensures(matches!(old(self.get(key)), None) ==>
+            forall(|k : T| self.get(k) === old(self.get(k))))
+        ]
         fn remove(&mut self, key: T) {
             unimplemented!()
         }
@@ -176,7 +180,9 @@ mod erc721 {
         forall(|t: TokenId|
             (holds(TokenApproval(t)) == PermAmount::from(0) &&
             old(holds(TokenApproval(t))) == PermAmount::from(0)) ==>
-            self.get_approved(t) === old(self.get_approved(t)))
+            self.get_approved(t) === old(self.get_approved(t)),
+            triggers = [(self.get_approved(t))]
+        )
     )]
     #[invariant_twostate(
         forall(|a1: AccountId, a2: AccountId|
@@ -270,6 +276,17 @@ mod erc721 {
         }
 
         /// Approves or disapproves the operator for all tokens of the caller.
+        #[cfg(feature="resource")]
+        #[requires(to != self.env.caller() ==> resource(AccountApproval(self.env.caller(), to), 1))]
+        pub fn set_approval_for_all(
+            &mut self,
+            to: AccountId,
+            approved: bool,
+        ) -> Result<(), Error> {
+            self.approve_for_all(to, approved)
+        }
+
+        #[cfg(not(feature="resource"))]
         #[requires(to != self.env.caller() ==> resource(AccountApproval(self.env.caller(), to), 1))]
         pub fn set_approval_for_all(
             &mut self,
@@ -441,11 +458,9 @@ mod erc721 {
         }
 
         #[requires(
-            (self.owner_of(id) == Some(from) && self.can_transfer(self.env.caller(), id)) ==> resource(OwnershipOf(id), 1))]
-        #[requires(
-            (self.owner_of(id) == Some(from) && self.can_transfer(self.env.caller(), id)) ==> resource(OwnedTokens(
-            from
-        ), 1))]
+            (self.owner_of(id) == Some(from) && self.can_transfer(self.env.caller(), id)) ==>
+            resource(OwnershipOf(id), 1) && resource(OwnedTokens(from), 1)
+        )]
         #[requires(
             (self.owner_of(id) == Some(from) &&
             self.can_transfer(self.env.caller(), id) &&
@@ -454,6 +469,8 @@ mod erc721 {
         ), 1))]
         #[ensures(result == Ok(()) ==> resource(OwnershipOf(id), 1))]
         #[ensures(result == Ok(()) ==> resource(OwnedTokens(to), 1))]
+        #[ensures(result == Ok(()) ==> self.token_owner.get(id) == Some(to))]
+        #[ensures(result == Ok(()) ==> self.get_approved(id) == None)]
         fn transfer_token_from(
             &mut self,
             from: AccountId,
@@ -470,7 +487,6 @@ mod erc721 {
             if self.token_owner.get(id) != Some(from) {
                 return Err(Error::NotOwner);
             }
-            prusti_assert!(self.can_transfer(caller, id));
             self.clear_approval(id);
             let r = self.remove_token_from(from, id);
             if !matches!(r, Ok(_)) {
@@ -481,12 +497,6 @@ mod erc721 {
                 return r;
             }
 
-            // TODO
-            // self.env.emit_event(Transfer {
-            //     from: Some(*from),
-            //     to: Some(*to),
-            //     id,
-            // });
             Ok(())
         }
 
@@ -494,6 +504,7 @@ mod erc721 {
         #[requires(self.owner_of(id) == Some(from))]
         #[requires(resource(OwnershipOf(id), 1))]
         #[requires(resource(OwnedTokens(from), 1))]
+        #[ensures(result == Ok(()) ==> self.owner_of(id) == None)]
         fn remove_token_from(
             &mut self,
             from: AccountId,
@@ -511,7 +522,6 @@ mod erc721 {
             } = self;
 
             if !token_owner.contains(id) {
-                prusti_assert!(false);
                 return Err(Error::TokenNotFound);
             }
 
@@ -531,8 +541,10 @@ mod erc721 {
         }
 
         /// Adds the token `id` to the `to` AccountID.
-        #[ensures(result == Ok(()) ==> resource(OwnershipOf(id), 1))]
-        #[ensures(result == Ok(()) ==> resource(OwnedTokens(to), 1))]
+        #[cfg_attr(feature="resource", ensures(result == Ok(()) ==> resource(OwnershipOf(id), 1)))]
+        #[cfg_attr(feature="resource", ensures(result == Ok(()) ==> resource(OwnedTokens(to), 1)))]
+        #[ensures(result == Ok(()) ==> self.token_owner.get(id) == Some(to))]
+        #[ensures(to != 0 && !old(self.token_owner.contains(id)) <==> result == Ok(()))]
         fn add_token_to(&mut self, to: AccountId, id: TokenId) -> Result<(), Error> {
             let Self {
                 token_owner,
@@ -544,31 +556,29 @@ mod erc721 {
                 return Err(Error::TokenExists);
             }
 
-            // TODO
-            // if to == 0 {
-            //     return Err(Error::NotAllowed);
-            // };
+            if to == 0 {
+                return Err(Error::NotAllowed);
+            };
 
             let count = owned_tokens_count.get(to).unwrap_or(0);
             let count = count + 1;
 
             owned_tokens_count.insert(to, count);
             token_owner.insert(id, to);
-            produce!(resource(OwnershipOf(id), 1));
-            produce!(resource(OwnedTokens(to), 1));
-            prusti_assert!(self.balance_of(to) == count);
-            prusti_assert!(self.owner_of(id) == Some(to));
-            prusti_assert!(
-                forall(|t: TokenId| t != id ==>
-                    self.owner_of(t) == old(self.owner_of(t))
-                )
-            );
+
+            #[cfg(feature="resource")] {
+                produce!(resource(OwnershipOf(id), 1));
+                produce!(resource(OwnedTokens(to), 1));
+            }
 
             Ok(())
         }
 
         /// Approves or disapproves the operator to transfer all tokens of the caller.
-        #[requires(to != self.env.caller() ==> resource(AccountApproval(self.env.caller(), to), 1))]
+        #[cfg_attr(feature="resource",
+            requires(to != self.env.caller() ==> resource(AccountApproval(self.env.caller(), to), 1)))]
+        #[ensures(result == Ok(()) <==> to != self.env.caller())]
+        #[ensures(result == Ok(()) ==> self.approved_for_all(self.env.caller(), to) == approved)]
         fn approve_for_all(
             &mut self,
             to: AccountId,
@@ -596,6 +606,7 @@ mod erc721 {
         /// Approve the passed `AccountId` to transfer the specified token on behalf of
         /// the message's sender.
         #[ensures(result == Ok(()) ==> resource(TokenApproval(id), 1))]
+        #[ensures(result == Ok(()) ==> self.token_approvals.get(id) == Some(to))]
         fn approve_for(&mut self, to: AccountId, id: TokenId) -> Result<(), Error> {
             let caller = self.env.caller();
             let owner = match self.owner_of(id) {
@@ -617,20 +628,17 @@ mod erc721 {
             } else {
                 self.token_approvals.insert(id, to);
             }
-            produce!(resource(TokenApproval(id), 1));
 
-            // TODO
-            // self.env.emit_event(Approval {
-            //     from: caller,
-            //     to,
-            //     id,
-            // });
+            #[cfg(feature="resource")]
+            produce!(resource(TokenApproval(id), 1));
 
             Ok(())
         }
 
         /// Removes existing approval from token `id`.
-        #[requires(self.get_approved(id) != None ==> resource(TokenApproval(id), 1))]
+        #[requires(!matches!(self.get_approved(id), None) ==> resource(TokenApproval(id), 1))]
+        #[ensures(matches!(self.get_approved(id), None))]
+        #[ensures(self.get_approved(id) == None)]
         fn clear_approval(&mut self, id: TokenId) {
             self.token_approvals.remove(id);
         }
