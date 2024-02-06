@@ -113,21 +113,23 @@ mod erc721 {
         fn emit_event<T>(&self, event: T) {}
     }
 
-    impl<K: Copy, V: Copy> Mapping<K, V> {
+    impl<T: Copy, U: Copy> Mapping<T, U> {
+
         #[trusted]
-        #[ensures(forall(|k : K| result.get(k) === None))]
-        #[ensures(forall(|k : K| !result.get(k).is_some()))]
+        #[ensures(forall(|k : T| result.get(k) === None, triggers = [(result.get(k))]))]
+        #[ensures(forall(|k : T| !result.get(k).is_some(), triggers = [(result.get(k))]))]
         fn new() -> Self {
             unimplemented!()
         }
-    }
 
-    impl<T: Copy, U: Copy> Mapping<T, U> {
         #[trusted]
         #[ensures(self.get(key) === Some(value))]
         #[ensures(self.get(key).is_some())]
         #[ensures(self.get(key).unwrap() === value)]
-        #[ensures(forall(|k : T| k !== key ==> self.get(k) === old(self.get(k))))]
+        #[ensures(
+            forall(|k : T| k !== key ==> self.get(k) === old(self.get(k)),
+            triggers=[(self.get(k))])
+        )]
         fn insert(&mut self, key: T, value: U) {
             unimplemented!()
         }
@@ -135,9 +137,13 @@ mod erc721 {
         #[trusted]
         #[ensures(matches!(self.get(key), None))]
         #[ensures(self.get(key) === None)]
-        #[ensures(forall(|k : T| k !== key ==> self.get(k) === old(self.get(k))))]
+        #[ensures(
+            forall(|k : T| k !== key ==> self.get(k) === old(self.get(k)),
+            triggers=[(self.get(k))])
+        )]
         #[ensures(matches!(old(self.get(key)), None) ==>
-            forall(|k : T| self.get(k) === old(self.get(k))))
+            forall(|k : T| self.get(k) === old(self.get(k)),
+            triggers=[(self.get(k))]))
         ]
         fn remove(&mut self, key: T) {
             unimplemented!()
@@ -161,8 +167,8 @@ mod erc721 {
     #[invariant_twostate(
         forall(|a: AccountId|
             holds(OwnedTokens(a)) - old(holds(OwnedTokens(a))) ==
-            PermAmount::from(self.balance_of(a)) - PermAmount::from(old(self.balance_of(a)))
-        )
+            PermAmount::from(self.balance_of(a)) - PermAmount::from(old(self.balance_of(a))),
+            triggers=[(self.balance_of(a))])
     )]
     #[invariant_twostate(
         forall(|t: TokenId|
@@ -188,7 +194,9 @@ mod erc721 {
         forall(|a1: AccountId, a2: AccountId|
             (holds(AccountApproval(a1, a2)) == PermAmount::from(0) &&
             old(holds(AccountApproval(a1, a2))) == PermAmount::from(0)) ==>
-            self.approved_for_all(a1, a2) === old(self.approved_for_all(a1, a2)))
+            self.approved_for_all(a1, a2) === old(self.approved_for_all(a1, a2)),
+            triggers = [(self.approved_for_all(a1, a2))]
+        )
     )]
     pub struct Erc721 {
         /// Mapping from token to owner.
@@ -276,18 +284,10 @@ mod erc721 {
         }
 
         /// Approves or disapproves the operator for all tokens of the caller.
-        #[cfg(feature="resource")]
-        #[requires(to != self.env.caller() ==> resource(AccountApproval(self.env.caller(), to), 1))]
-        pub fn set_approval_for_all(
-            &mut self,
-            to: AccountId,
-            approved: bool,
-        ) -> Result<(), Error> {
-            self.approve_for_all(to, approved)
-        }
-
-        #[cfg(not(feature="resource"))]
-        #[requires(to != self.env.caller() ==> resource(AccountApproval(self.env.caller(), to), 1))]
+        #[cfg_attr(feature="resource",
+            requires(to != self.env.caller() ==> resource(AccountApproval(self.env.caller(), to), 1)))]
+        #[ensures(result == Ok(()) <==> to != self.env.caller())]
+        #[ensures(result == Ok(()) ==> self.approved_for_all(self.env.caller(), to) == approved)]
         pub fn set_approval_for_all(
             &mut self,
             to: AccountId,
@@ -298,6 +298,7 @@ mod erc721 {
 
         /// Approves the account to transfer the specified token on behalf of the caller.
         #[ensures(result == Ok(()) ==> resource(TokenApproval(id), 1))]
+        #[ensures(result == Ok(()) ==> self.token_approvals.get(id) == Some(to))]
         pub fn approve(&mut self, to: AccountId, id: TokenId) -> Result<(), Error> {
             self.approve_for(to, id)
         }
@@ -314,6 +315,8 @@ mod erc721 {
         ), 1))]
         #[ensures(result == Ok(()) ==> resource(OwnershipOf(id), 1))]
         #[ensures(result == Ok(()) ==> resource(OwnedTokens(to), 1))]
+        #[ensures(result == Ok(()) ==> self.token_owner.get(id) == Some(to))]
+        #[ensures(result == Ok(()) ==> self.get_approved(id) == None)]
         pub fn transfer(
             &mut self,
             to: AccountId,
@@ -357,6 +360,8 @@ mod erc721 {
         ), 1))]
         #[ensures(result == Ok(()) ==> resource(OwnershipOf(id), 1))]
         #[ensures(result == Ok(()) ==> resource(OwnedTokens(to), 1))]
+        #[ensures(result == Ok(()) ==> self.token_owner.get(id) == Some(to))]
+        #[ensures(result == Ok(()) ==> self.get_approved(id) == None)]
         pub fn transfer_from(
             &mut self,
             from: AccountId,
@@ -369,19 +374,11 @@ mod erc721 {
         /// Creates a new token.
         #[ensures(result == Ok(()) ==> resource(OwnershipOf(id), 1))]
         #[ensures(result == Ok(()) ==> resource(OwnedTokens(self.env.caller()), 1))]
+        #[ensures(result == Ok(()) ==> self.token_owner.get(id) == Some(self.env.caller()))]
+        #[ensures(self.env.caller() != 0 && !old(self.token_owner.contains(id)) <==> result == Ok(()))]
         pub fn mint(&mut self, id: TokenId) -> Result<(), Error> {
             let caller = self.env.caller();
-            let result = self.add_token_to(caller, id);
-            if !matches!(result, Ok(_)) {
-                return result;
-            }
-            // TODO
-            // self.env.emit_event(Transfer {
-            //     from: Some(0),
-            //     to: Some(caller),
-            //     id,
-            // });
-            Ok(())
+            return self.add_token_to(caller, id);
         }
 
         /// Deletes an existing token. Only the owner can burn the token.
@@ -393,17 +390,13 @@ mod erc721 {
             self.owner_of(id) == Some(self.env.caller()) ==>
             resource(OwnedTokens(self.env.caller()), 1)
         )]
+        #[ensures(result == Ok(()) ==> self.owner_of(id) == None)]
         pub fn burn(&mut self, id: TokenId) -> Result<(), Error> {
             let caller = self.env.caller();
 
             // Unused but required for triggers
             let owner_orig = self.owner_of(id);
             let balance_orig = self.balance_of(caller);
-
-            prusti_assert!(
-        forall(|a: AccountId, t: TokenId|
-        self.owner_of(t) === Some(a) ==> self.balance_of(a) > 0
-        , triggers=[(self.owner_of(t), self.balance_of(a))]));
 
             let Self {
                 token_owner,
@@ -423,14 +416,12 @@ mod erc721 {
             };
 
             let count = owned_tokens_count.get(caller);
-            prusti_assert!(count.is_some());
             let count = match count {
                 Some(count) => count,
                 None => {
                     return Err(Error::CannotFetchValue);
                 }
             };
-            prusti_assert!(count > 0);
             consume!(resource(OwnershipOf(id), 1));
             consume!(resource(OwnedTokens(caller), 1));
             let count = count - 1;
@@ -446,13 +437,6 @@ mod erc721 {
         forall(|a: AccountId, t: TokenId|
         self.owner_of(t) === Some(a) ==> self.balance_of(a) > 0
         , triggers=[(self.owner_of(t), self.balance_of(a))]));
-
-            // TODO
-            // self.env.emit_event(Transfer {
-            //     from: Some(caller),
-            //     to: Some(0),
-            //     id,
-            // });
 
             Ok(())
         }
