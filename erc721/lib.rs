@@ -538,14 +538,17 @@ mod erc721 {
             token_owner.remove(id);
             prusti_assert!(self.balance_of(caller) == old(self.balance_of(self.env().caller())) - 1);
             prusti_assert!(self.balance_of(caller) == self.computed_balance(caller));
-            prusti_assert!(forall(|a: AccountId| a != caller ==>
-                self.balance_of(a) == old(self.balance_of(a)) &&
-                old(self.balance_of(a)) == old(self.computed_balance(a)) &&
-                old(self.computed_balance(a)) == self.computed_balance(a)
-            ));
-            // TODO: wtf?
+            prusti_assert!(
+                forall(|a: AccountId| a != caller ==>
+                    self.balance_of(a) == old(self.balance_of(a)) &&
+                    old(self.balance_of(a)) == old(self.computed_balance(a)) &&
+                    old(self.computed_balance(a)) == self.computed_balance(a)
+                )
+            );
+            // TODO: This is clearly implied by the previous assertion
             prusti_assume!(forall(|a: AccountId| a != caller ==>
-                self.balance_of(a) == self.computed_balance(a)));
+                self.balance_of(a) == self.computed_balance(a))
+            );
 
             Ok(())
         }
@@ -603,7 +606,15 @@ mod erc721 {
         #[ensures(result == Ok(()) ==> self.owner_of(id) == None)]
         #[cfg_attr(not(feature="resource"),
             ensures(self.get_token_approvals() === old(self.get_token_approvals())),
-            ensures(self.get_operator_approvals() === old(self.get_operator_approvals()))
+            ensures(self.get_operator_approvals() === old(self.get_operator_approvals())),
+            ensures(forall(|t: TokenId| t != id ==> self.token_owner.get(t) == old(self.token_owner.get(t)))),
+            ensures(result == Ok(()) ==> forall(|a: AccountId|
+                self.balance_of(a) == if(a == from) {
+                    old(self.balance_of(a)) - 1
+                } else {
+                    old(self.balance_of(a))
+                }
+            ))
         )]
         fn remove_token_from(
             &mut self,
@@ -634,24 +645,27 @@ mod erc721 {
             owned_tokens_count.insert(from, count);
             token_owner.remove(id);
 
-            prusti_assume!(
-        forall(|a: AccountId, t: TokenId|
-        self.owner_of(t) === Some(a) ==> self.balance_of(a) > 0
-        , triggers=[(self.owner_of(t), self.balance_of(a))]));
-
             Ok(())
         }
 
         /// Adds the token `id` to the `to` AccountID.
-        #[cfg_attr(feature="resource", ensures(result == Ok(()) ==> resource(OwnershipOf(id), 1)))]
-        #[cfg_attr(feature="resource", ensures(result == Ok(()) ==> resource(OwnedTokens(to), 1)))]
+        #[cfg_attr(feature="resource",
+            ensures(result == Ok(()) ==> resource(OwnershipOf(id), 1)),
+            ensures(result == Ok(()) ==> resource(OwnedTokens(to), 1))
+        )]
         #[ensures(result == Ok(()) ==> self.token_owner.get(id) == Some(to))]
         #[ensures(to != 0 && !old(self.token_owner.contains(id)) <==> result == Ok(()))]
         #[cfg_attr(not(feature="resource"),
             ensures(self.get_token_approvals() === old(self.get_token_approvals())),
             ensures(self.get_operator_approvals() === old(self.get_operator_approvals())),
-            ensures(forall(|t: TokenId| t != id ==> self.token_owner.get(t) == old(self.token_owner.get(t))))
-            // ensures(forall(|a: AccountId|)
+            ensures(forall(|t: TokenId| t != id ==> self.token_owner.get(t) == old(self.token_owner.get(t)))),
+            ensures(result == Ok(()) ==> forall(|a: AccountId|
+                self.balance_of(a) == if(a == to) {
+                    old(self.balance_of(a)) + 1
+                } else {
+                    old(self.balance_of(a))
+                }
+            ))
         )]
         #[ensures(result != Ok(()) ==> self.snap() === old(self.snap()))]
         fn add_token_to(&mut self, to: AccountId, id: TokenId) -> Result<(), Error> {
@@ -692,7 +706,10 @@ mod erc721 {
             ensures(forall(|a1: AccountId, a2: AccountId|
                 (a1 != self.env().caller() && a2 != to) ==>
                 self.approved_for_all(a1, a2) == old(self.approved_for_all(a1, a2))
-            ))
+            )),
+            ensures(self.get_owned_tokens_count() === old(self.get_owned_tokens_count())),
+            ensures(forall(|a: AccountId| self.balance_of(a) == old(self.balance_of(a)))),
+            ensures(self.get_token_approvals() === old(self.get_token_approvals()))
         )]
         fn approve_for_all(
             &mut self,
@@ -725,6 +742,15 @@ mod erc721 {
             ensures(result == Ok(()) ==> resource(TokenApproval(id), 1))
         )]
         #[ensures(result == Ok(()) ==> self.token_approvals.get(id) == Some(to))]
+        #[cfg_attr(
+            not(feature="resource"),
+            ensures(forall(|tokenId: TokenId| tokenId != id ==>
+                self.token_approvals.get(tokenId) == old(self.token_approvals.get(tokenId))
+            )),
+            ensures(forall(|a: AccountId| self.balance_of(a) == old(self.balance_of(a)))),
+            ensures(self.get_operator_approvals() === old(self.get_operator_approvals())),
+            ensures(self.get_owned_tokens_count() === old(self.get_owned_tokens_count()))
+        )]
         fn approve_for(&mut self, to: AccountId, id: TokenId) -> Result<(), Error> {
             let caller = self.env.caller();
             let owner = match self.owner_of(id) {
@@ -761,6 +787,7 @@ mod erc721 {
         #[ensures(self.get_approved(id) == None)]
         #[cfg_attr(not(feature="resource"),
             ensures(self.get_token_owner() === old(self.get_token_owner())),
+            ensures(forall(|a: AccountId| self.balance_of(a) == old(self.balance_of(a)))),
             ensures(self.get_owned_tokens_count() === old(self.get_owned_tokens_count())),
             ensures(self.get_operator_approvals() === old(self.get_operator_approvals())),
             ensures(forall(|t: TokenId| t != id ==> self.get_approved(t) == old(self.get_approved(t))))
