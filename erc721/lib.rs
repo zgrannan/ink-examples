@@ -398,8 +398,21 @@ mod erc721 {
         }
 
         /// Approves the account to transfer the specified token on behalf of the caller.
-        #[cfg_attr(feature="resource", ensures(result == Ok(()) ==> resource(TokenApproval(id), 1)))]
+        #[cfg_attr(
+            feature="resource",
+            ensures(result == Ok(()) ==> resource(TokenApproval(id), 1))
+        )]
+        #[cfg_attr(
+            not(feature="resource"),
+            ensures(forall(|tokenId: TokenId| tokenId != id ==>
+                self.token_approvals.get(tokenId) == old(self.token_approvals.get(tokenId))
+            )),
+            ensures(forall(|a: AccountId| self.balance_of(a) == old(self.balance_of(a)))),
+            ensures(self.get_operator_approvals() === old(self.get_operator_approvals())),
+            ensures(self.get_owned_tokens_count() === old(self.get_owned_tokens_count()))
+        )]
         #[ensures(result == Ok(()) ==> self.token_approvals.get(id) == Some(to))]
+        #[ensures(result != Ok(()) ==> self.snap() === old(self.snap()))]
         pub fn approve(&mut self, to: AccountId, id: TokenId) -> Result<(), Error> {
             self.approve_for(to, id)
         }
@@ -505,6 +518,23 @@ mod erc721 {
         )]
         #[ensures(result == Ok(()) ==> self.token_owner.get(id) == Some(self.env.caller()))]
         #[ensures(self.env.caller() != 0 && !old(self.token_owner.contains(id)) <==> result == Ok(()))]
+        #[cfg_attr(not(feature="resource"),
+            ensures(self.get_token_approvals() === old(self.get_token_approvals())),
+            ensures(self.get_operator_approvals() === old(self.get_operator_approvals())),
+            ensures(forall(|t: TokenId| t != id ==> self.token_owner.get(t) == old(self.token_owner.get(t)))),
+            ensures(result == Ok(()) ==> forall(|a: AccountId|
+                self.balance_of(a) == if(a == self.env.caller()) {
+                    old(self.balance_of(a)) + 1
+                } else {
+                    old(self.balance_of(a))
+                }
+            ))
+        )]
+        #[ensures(
+            old(self.owner_of(id) == None) && self.env.caller() != 0 ==>
+                matches!(result, Ok(()))
+        )]
+        #[ensures(result != Ok(()) ==> self.snap() === old(self.snap()))]
         pub fn mint(&mut self, id: TokenId) -> Result<(), Error> {
             let caller = self.env.caller();
             return self.add_token_to(caller, id);
@@ -514,12 +544,25 @@ mod erc721 {
         #[cfg_attr(feature="resource",
             requires(
                 self.owner_of(id) == Some(self.env.caller()) ==>
-                    resource(OwnershipOf(id), 1)
-            ),
-            requires(
-                self.owner_of(id) == Some(self.env.caller()) ==>
+                    resource(OwnershipOf(id), 1) &&
                     resource(OwnedTokens(self.env.caller()), 1)
             )
+            // requires(
+            //     self.owner_of(id) == Some(self.env.caller()) ==>
+            //         resource(OwnedTokens(self.env.caller()), 1)
+            // )
+        )]
+        #[cfg_attr(not(feature="resource"),
+            ensures(self.get_token_approvals() === old(self.get_token_approvals())),
+            ensures(self.get_operator_approvals() === old(self.get_operator_approvals())),
+            ensures(forall(|t: TokenId| t != id ==> self.token_owner.get(t) == old(self.token_owner.get(t)))),
+            ensures(result == Ok(()) ==> forall(|a: AccountId|
+                self.balance_of(a) == if(a == from) {
+                    old(self.balance_of(a)) - 1
+                } else {
+                    old(self.balance_of(a))
+                }
+            ))
         )]
         #[ensures(result == Ok(()) ==> self.owner_of(id) == None)]
         pub fn burn(&mut self, id: TokenId) -> Result<(), Error> {
