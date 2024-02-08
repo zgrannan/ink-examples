@@ -434,14 +434,11 @@ mod erc721 {
 
         predicate! {
             fn can_transfer(&self, from: AccountId, id: TokenId, to: AccountId) -> bool {
-                if (to != 0 && self.token_exists(id)) {
-                    let owner = self.owner_of(id);
-                        (Some(from) == owner
-                            || Some(from) == self.token_approvals.get(id)
-                            || self.approved_for_all(owner.unwrap(), from))
-                } else {
-                    false
-                }
+                let owner = self.owner_of(id);
+                to != 0 && self.token_exists(id) &&
+                    (Some(from) == owner
+                        || Some(from) == self.token_approvals.get(id)
+                        || self.approved_for_all(owner.unwrap(), from))
             }
         }
 
@@ -450,15 +447,15 @@ mod erc721 {
             requires(
                 self.token_owner.get(id) == Some(from) &&
                 self.can_transfer(self.env.caller(), id, to)
-                ==> resource(OwnershipOf(id), 1)),
-            requires(
-                self.token_owner.get(id) == Some(from) &&
-                self.can_transfer(self.env.caller(), id, to)
-                ==> resource(OwnedTokens(from), 1)),
-            requires(
-                (self.owner_of(id) == Some(from) &&
-                self.can_transfer(self.env.caller(), id, to) &&
-                self.get_approved(id) != None) ==> resource(TokenApproval(id), 1)),
+                ==> (
+                    resource(OwnershipOf(id), 1)) &&
+                    resource(OwnedTokens(from), 1) &&
+                    ((self.get_approved(id) != None) ==> resource(TokenApproval(id), 1))
+                ),
+            // requires(
+            //     (self.owner_of(id) == Some(from) &&
+            //     self.can_transfer(self.env.caller(), id, to) &&
+            //     self.get_approved(id) != None) ==> resource(TokenApproval(id), 1)),
             ensures(result == Ok(()) ==> resource(OwnershipOf(id), 1)),
             ensures(result == Ok(()) ==> resource(OwnedTokens(to), 1))
         )]
