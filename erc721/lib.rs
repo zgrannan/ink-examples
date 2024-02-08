@@ -425,23 +425,20 @@ mod erc721 {
         ) -> Result<(), Error> {
             let caller = self.env.caller();
             if {
-                self.token_owner.get(id) == Some(caller)
+                self.token_owner.get(id) == Some(caller) && to != 0
             } {
-                prusti_assert!(self.can_transfer(caller, id));
+                prusti_assert!(self.can_transfer(caller, id, to));
             }
             self.transfer_token_from(caller, to, id)
         }
 
         predicate! {
-            fn can_transfer(&self, from: AccountId, id: TokenId) -> bool {
-                if self.token_exists(id) {
+            fn can_transfer(&self, from: AccountId, id: TokenId, to: AccountId) -> bool {
+                if (to != 0 && self.token_exists(id)) {
                     let owner = self.owner_of(id);
                         (Some(from) == owner
                             || Some(from) == self.token_approvals.get(id)
-                            || self.approved_for_all(
-                                owner.unwrap(),
-                                from
-                            ))
+                            || self.approved_for_all(owner.unwrap(), from))
                 } else {
                     false
                 }
@@ -452,16 +449,16 @@ mod erc721 {
         #[cfg_attr(feature="resource",
             requires(
                 self.token_owner.get(id) == Some(from) &&
-                self.can_transfer(self.env.caller(), id) &&
-                to != 0 ==> resource(OwnershipOf(id), 1)),
+                self.can_transfer(self.env.caller(), id, to)
+                ==> resource(OwnershipOf(id), 1)),
             requires(
                 self.token_owner.get(id) == Some(from) &&
-                self.can_transfer(self.env.caller(), id) &&
-                to != 0 ==> resource(OwnedTokens(from), 1)),
+                self.can_transfer(self.env.caller(), id, to)
+                ==> resource(OwnedTokens(from), 1)),
             requires(
                 (self.owner_of(id) == Some(from) &&
-                self.can_transfer(self.env.caller(), id) &&
-                to != 0 && self.get_approved(id) != None) ==> resource(TokenApproval(id), 1)),
+                self.can_transfer(self.env.caller(), id, to) &&
+                self.get_approved(id) != None) ==> resource(TokenApproval(id), 1)),
             ensures(result == Ok(()) ==> resource(OwnershipOf(id), 1)),
             ensures(result == Ok(()) ==> resource(OwnedTokens(to), 1))
         )]
@@ -567,12 +564,11 @@ mod erc721 {
 
         #[cfg_attr(feature="resource",
             requires(
-                (self.owner_of(id) == Some(from) && self.can_transfer(self.env.caller(), id) && to != 0) ==>
+                (self.owner_of(id) == Some(from) && self.can_transfer(self.env.caller(), id, to)) ==>
                 resource(OwnershipOf(id), 1) && resource(OwnedTokens(from), 1)),
             requires(
                         (self.owner_of(id) == Some(from) &&
-                        self.can_transfer(self.env.caller(), id) &&
-                        to != 0 &&
+                        self.can_transfer(self.env.caller(), id, to) &&
                         self.get_approved(id) != None) ==> resource(TokenApproval(
                         id
                     ), 1)),
