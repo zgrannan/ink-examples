@@ -416,8 +416,24 @@ mod erc721 {
             ensures(result == Ok(()) ==> resource(OwnershipOf(id), 1)),
             ensures(result == Ok(()) ==> resource(OwnedTokens(to), 1))
         )]
+        #[cfg_attr(not(feature="resource"),
+            ensures(forall(|t: TokenId| t != id ==>
+                self.get_approved(t) == old(self.get_approved(t)) &&
+                self.owner_of(t) == old(self.owner_of(t))
+            )),
+            ensures(result == Ok(()) ==> forall(|a: AccountId|
+                self.balance_of(a) == if(a == self.env.caller() && self.env.caller() != to) {
+                    old(self.balance_of(a)) - 1
+                } else if (a == to && self.env.caller() != to) {
+                    old(self.balance_of(a)) + 1
+                } else {
+                    old(self.balance_of(a))
+                }
+            ))
+        )]
         #[ensures(result == Ok(()) ==> self.token_owner.get(id) == Some(to))]
         #[ensures(result == Ok(()) ==> self.get_approved(id) == None)]
+        #[ensures(result != Ok(()) ==> self.snap() === old(self.snap()))]
         pub fn transfer(
             &mut self,
             to: AccountId,
@@ -452,15 +468,27 @@ mod erc721 {
                     resource(OwnedTokens(from), 1) &&
                     ((self.get_approved(id) != None) ==> resource(TokenApproval(id), 1))
                 ),
-            // requires(
-            //     (self.owner_of(id) == Some(from) &&
-            //     self.can_transfer(self.env.caller(), id, to) &&
-            //     self.get_approved(id) != None) ==> resource(TokenApproval(id), 1)),
             ensures(result == Ok(()) ==> resource(OwnershipOf(id), 1)),
             ensures(result == Ok(()) ==> resource(OwnedTokens(to), 1))
         )]
+        #[cfg_attr(not(feature="resource"),
+            ensures(forall(|t: TokenId| t != id ==>
+                self.get_approved(t) == old(self.get_approved(t)) &&
+                self.owner_of(t) == old(self.owner_of(t))
+            )),
+            ensures(result == Ok(()) ==> forall(|a: AccountId|
+                self.balance_of(a) == if(a == from && from != to) {
+                    old(self.balance_of(a)) - 1
+                } else if (a == to && from != to) {
+                    old(self.balance_of(a)) + 1
+                } else {
+                    old(self.balance_of(a))
+                }
+            ))
+        )]
         #[ensures(result == Ok(()) ==> self.token_owner.get(id) == Some(to))]
         #[ensures(result == Ok(()) ==> self.get_approved(id) == None)]
+        #[ensures(result != Ok(()) ==> self.snap() === old(self.snap()))]
         pub fn transfer_from(
             &mut self,
             from: AccountId,
