@@ -118,7 +118,7 @@ mod erc721 {
         fn emit_event<T>(&self, event: T) {}
     }
 
-    impl<T: Copy, U: Copy> Mapping<T, U> {
+    impl<T: Copy, U: Copy + PartialEq> Mapping<T, U> {
 
         #[trusted]
         #[ensures(forall(|k : T| result.get(k) === None, triggers = [(result.get(k))]))]
@@ -135,6 +135,21 @@ mod erc721 {
             forall(|k : T| k !== key ==> self.get(k) === old(self.get(k)),
             triggers=[(self.get(k))])
         )]
+        #[ensures(
+            forall(|u : U|
+                if (Some(u) == old(self.get(key)) && u != value)
+                {
+                    // The number of entries with the old value is decreased by one.
+                    self.num_entries_with_value(u) == old(self.num_entries_with_value(u)) - 1
+                } else if (old(self.get(key)) != Some(u) && u == value) {
+                    // The number of entries with the new value is increased by one,
+                    // only if the old value was not the new value.
+                    self.num_entries_with_value(u) == old(self.num_entries_with_value(u)) + 1
+                } else {
+                    self.num_entries_with_value(u) == old(self.num_entries_with_value(u))
+                }
+            )
+        )]
         fn insert(&mut self, key: T, value: U) {
             unimplemented!()
         }
@@ -150,12 +165,43 @@ mod erc721 {
             forall(|k : T| self.get(k) === old(self.get(k)),
             triggers=[(self.get(k))]))
         ]
+        #[ensures(
+            forall(|u : U|
+                if (matches!(old(self.get(key)), Some(_)) && u == old(self.get(key).unwrap())) {
+                    self.num_entries_with_value(u) == old(self.num_entries_with_value(u)) - 1
+                } else {
+                    self.num_entries_with_value(u) == old(self.num_entries_with_value(u))
+                }
+            )
+        )]
+        #[ensures(self.snap() === old(self.snap().as_removed(key)))]
         fn remove(&mut self, key: T) {
             unimplemented!()
         }
 
         #[pure]
+        fn snap(&self) -> &Self {
+            &self
+        }
+
+        #[pure]
         #[trusted]
+        fn as_removed(&self, key: T) -> &Self {
+            unimplemented!()
+        }
+
+        #[pure]
+        #[trusted]
+        fn num_entries_with_value(&self, value: U) -> u32 {
+            unimplemented!()
+        }
+
+        #[pure]
+        #[trusted]
+        #[ensures(result.is_some() ==>
+            self.num_entries_with_value(result.unwrap()) == 1 +
+                self.as_removed(key).num_entries_with_value(result.unwrap())
+        )]
         fn get(&self, key: T) -> Option<U> {
             unimplemented!()
         }
@@ -167,9 +213,6 @@ mod erc721 {
             unimplemented!()
         }
     }
-
-    #[pure]
-    fn owner_balance_axiom(t: TokenId, a: AccountId) {}
 
     #[invariant_twostate(self.env.caller() === old(self.env.caller()))]
     #[cfg_attr(feature="resource", invariant_twostate(
@@ -185,10 +228,9 @@ mod erc721 {
             self.owner_of(t) === old(self.owner_of(t)), triggers=[(self.owner_of(t))])
     ))]
     #[invariant(
-        forall(|a: AccountId, t: TokenId|
-        self.owner_of(t) === Some(a) ==>
-            self.balance_of(a) > 0
-        , triggers=[(owner_balance_axiom(t, a))])
+        forall(|a: AccountId|
+        self.computed_balance(a) == self.balance_of(a)
+        )
     )]
     #[cfg_attr(feature="resource", invariant_twostate(
         forall(|t: TokenId|
@@ -293,6 +335,11 @@ mod erc721 {
         pub fn new() -> Self {
             unimplemented!()
             // Default::default()
+        }
+
+        #[pure]
+        pub fn computed_balance(&self, account: AccountId) -> u32 {
+            self.token_owner.num_entries_with_value(account)
         }
 
         /// Returns the balance of the owner.
@@ -443,9 +490,8 @@ mod erc721 {
         #[ensures(result == Ok(()) ==> self.owner_of(id) == None)]
         pub fn burn(&mut self, id: TokenId) -> Result<(), Error> {
             let caller = self.env.caller();
-
-            // Unused but required for triggers
-            let _ = owner_balance_axiom(id, caller);
+            prusti_assert!(forall(|a: AccountId| self.balance_of(a) == self.computed_balance(a)));
+            prusti_assert!(self.balance_of(caller) == self.token_owner.num_entries_with_value(caller));
 
             let Self {
                 token_owner,
@@ -463,6 +509,16 @@ mod erc721 {
             if owner != caller {
                 return Err(Error::NotOwner);
             };
+            prusti_assert!(owned_tokens_count.get(caller).unwrap_or(0) ==
+                token_owner.num_entries_with_value(caller));
+            prusti_assert!(token_owner.num_entries_with_value(caller) ==
+                token_owner.as_removed(id).num_entries_with_value(caller) +
+                1
+            );
+            prusti_assert!(owned_tokens_count.get(caller).unwrap_or(0) ==
+                token_owner.as_removed(id).num_entries_with_value(caller) +
+                1
+            );
 
             let count = owned_tokens_count.get(caller);
             let count = match count {
@@ -472,9 +528,6 @@ mod erc721 {
                 }
             };
 
-            // Only necessary in nonresource for some reason
-            prusti_assume!(count > 0);
-
             #[cfg(feature="resource")] {
                 consume!(resource(OwnershipOf(id), 1));
                 consume!(resource(OwnedTokens(caller), 1));
@@ -483,14 +536,16 @@ mod erc721 {
 
             owned_tokens_count.insert(caller, count);
             token_owner.remove(id);
-
-            // Unused but required for triggers
-            let _ = owner_balance_axiom(id, caller);
-
-            prusti_assume!(
-        forall(|a: AccountId, t: TokenId|
-        self.owner_of(t) === Some(a) ==> self.balance_of(a) > 0
-        , triggers=[(self.owner_of(t), self.balance_of(a))]));
+            prusti_assert!(self.balance_of(caller) == old(self.balance_of(self.env().caller())) - 1);
+            prusti_assert!(self.balance_of(caller) == self.computed_balance(caller));
+            prusti_assert!(forall(|a: AccountId| a != caller ==>
+                self.balance_of(a) == old(self.balance_of(a)) &&
+                old(self.balance_of(a)) == old(self.computed_balance(a)) &&
+                old(self.computed_balance(a)) == self.computed_balance(a)
+            ));
+            // TODO: wtf?
+            prusti_assume!(forall(|a: AccountId| a != caller ==>
+                self.balance_of(a) == self.computed_balance(a)));
 
             Ok(())
         }
@@ -556,9 +611,12 @@ mod erc721 {
             id: TokenId,
         ) -> Result<(), Error> {
 
-            // Unused but required for triggers
-            let owner_orig = self.owner_of(id);
-            let balance_orig = self.balance_of(from);
+            prusti_assert!(
+                self.token_owner.num_entries_with_value(from) > 0
+            );
+            prusti_assert!(
+                self.balance_of(from) > 0
+            );
 
             let Self {
                 token_owner,
@@ -569,7 +627,6 @@ mod erc721 {
             if !token_owner.contains(id) {
                 return Err(Error::TokenNotFound);
             }
-
 
             let count = owned_tokens_count.get(from).unwrap();
             let count = count - 1;
@@ -705,7 +762,8 @@ mod erc721 {
         #[cfg_attr(not(feature="resource"),
             ensures(self.get_token_owner() === old(self.get_token_owner())),
             ensures(self.get_owned_tokens_count() === old(self.get_owned_tokens_count())),
-            ensures(self.get_operator_approvals() === old(self.get_operator_approvals()))
+            ensures(self.get_operator_approvals() === old(self.get_operator_approvals())),
+            ensures(forall(|t: TokenId| t != id ==> self.get_approved(t) == old(self.get_approved(t))))
         )]
         fn clear_approval(&mut self, id: TokenId) {
             self.token_approvals.remove(id);
