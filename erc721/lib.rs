@@ -52,6 +52,16 @@
 #[allow(dead_code, unused_variables, unused_comparisons)]
 mod erc721 {
 
+    macro_rules! implies {
+        ($lhs:expr, $rhs:expr) => {
+            if $lhs {
+                $rhs
+            } else {
+                true
+            }
+        };
+    }
+
     use cfg_if::cfg_if;
     use prusti_contracts::*;
 
@@ -106,6 +116,7 @@ mod erc721 {
 
     /// A token ID.
     pub type TokenId = u32;
+    #[derive(Eq, PartialEq)]
     struct Mapping<K, V>(u32, std::marker::PhantomData<(K, V)>);
 
     struct Env(AccountId);
@@ -119,7 +130,6 @@ mod erc721 {
     }
 
     impl<T: Copy, U: Copy + PartialEq> Mapping<T, U> {
-
         #[trusted]
         #[ensures(forall(|k : T| result.get(k) === None, triggers = [(result.get(k))]))]
         #[ensures(forall(|k : T| !result.get(k).is_some(), triggers = [(result.get(k))]))]
@@ -214,12 +224,13 @@ mod erc721 {
         }
     }
 
-    #[invariant_twostate(self.env.caller() === old(self.env.caller()))]
+    #[invariant_twostate(self.env.caller() == old(self.env.caller()))]
     #[invariant(
         forall(|a: AccountId|
         self.computed_balance(a) == self.balance_of(a)
         )
     )]
+    // INVARIANTS_RESOURCE_SPEC_START
     #[cfg_attr(feature="resource",
         invariant_twostate(
             forall(|a: AccountId|
@@ -230,29 +241,30 @@ mod erc721 {
         ),
         invariant_twostate(
             forall(|t: TokenId|
-                (holds(OwnershipOf(t)) == PermAmount::from(0) &&
-                old(holds(OwnershipOf(t))) == PermAmount::from(0)) ==>
-                self.owner_of(t) === old(self.owner_of(t)),
+                implies!(holds(OwnershipOf(t)) == PermAmount::from(0) &&
+                old(holds(OwnershipOf(t))) == PermAmount::from(0),
+                self.owner_of(t) == old(self.owner_of(t))),
                 triggers=[(self.owner_of(t))]
             )
         ),
         invariant_twostate(
             forall(|t: TokenId|
-                (holds(TokenApproval(t)) == PermAmount::from(0) &&
-                old(holds(TokenApproval(t))) == PermAmount::from(0)) ==>
-                self.get_approved(t) === old(self.get_approved(t)),
+                implies!(holds(TokenApproval(t)) == PermAmount::from(0) &&
+                old(holds(TokenApproval(t))) == PermAmount::from(0),
+                self.get_approved(t) == old(self.get_approved(t))),
                 triggers = [(self.get_approved(t))]
             )
         ),
         invariant_twostate(
             forall(|a1: AccountId, a2: AccountId|
-                (holds(AccountApproval(a1, a2)) == PermAmount::from(0) &&
-                old(holds(AccountApproval(a1, a2))) == PermAmount::from(0)) ==>
-                self.approved_for_all(a1, a2) === old(self.approved_for_all(a1, a2)),
+                implies!(holds(AccountApproval(a1, a2)) == PermAmount::from(0) &&
+                old(holds(AccountApproval(a1, a2))) == PermAmount::from(0),
+                self.approved_for_all(a1, a2) == old(self.approved_for_all(a1, a2))),
                 triggers = [(self.approved_for_all(a1, a2))]
             )
         )
     )]
+    // INVARIANTS_RESOURCE_SPEC_END
     pub struct Erc721 {
         /// Mapping from token to owner.
         token_owner: Mapping<TokenId, AccountId>,
@@ -299,7 +311,6 @@ mod erc721 {
     }
 
     impl Erc721 {
-
         #[pure]
         fn snap(&self) -> &Self {
             &self
@@ -328,7 +339,6 @@ mod erc721 {
                 }
             }
         }
-
 
         #[pure]
         fn env(&self) -> &Env {
@@ -375,19 +385,25 @@ mod erc721 {
         }
 
         /// Approves or disapproves the operator for all tokens of the caller.
+        // SET_APPROVAL_FOR_ALL_RESOURCE_SPEC_START
         #[cfg_attr(feature="resource",
-            requires(to != self.env.caller() ==> resource(AccountApproval(self.env.caller(), to), 1)))]
+            requires(implies!(to != self.env.caller(), resource(AccountApproval(self.env.caller(), to), 1))))]
+        // SET_APPROVAL_FOR_ALL_RESOURCE_SPEC_END
+        // SET_APPROVAL_FOR_ALL_SPEC_START
         #[cfg_attr(not(feature="resource"),
             ensures(forall(|a1: AccountId, a2: AccountId|
-                (a1 != self.env().caller() && a2 != to) ==>
-                self.approved_for_all(a1, a2) == old(self.approved_for_all(a1, a2))
+                implies!(a1 != self.env().caller() && a2 != to,
+                self.approved_for_all(a1, a2) == old(self.approved_for_all(a1, a2)))
             )),
-            ensures(self.get_owned_tokens_count() === old(self.get_owned_tokens_count())),
+            ensures(self.get_owned_tokens_count() == old(self.get_owned_tokens_count())),
             ensures(forall(|a: AccountId| self.balance_of(a) == old(self.balance_of(a)))),
-            ensures(self.get_token_approvals() === old(self.get_token_approvals()))
+            ensures(self.get_token_approvals() == old(self.get_token_approvals()))
         )]
+        // SET_APPROVAL_FOR_ALL_SPEC_END
+        // SET_APPROVAL_FOR_ALL_COMMON_SPEC_START
+        #[ensures(implies!(result == Ok(()), self.approved_for_all(self.env.caller(), to) == approved))]
+        // SET_APPROVAL_FOR_ALL_COMMON_SPEC_END
         #[ensures(result == Ok(()) <==> to != self.env.caller())]
-        #[ensures(result == Ok(()) ==> self.approved_for_all(self.env.caller(), to) == approved)]
         #[ensures(result != Ok(()) ==> self.snap() === old(self.snap()))]
         pub fn set_approval_for_all(
             &mut self,
@@ -398,43 +414,53 @@ mod erc721 {
         }
 
         /// Approves the account to transfer the specified token on behalf of the caller.
+        // APPROVE_RESOURCE_SPEC_START
         #[cfg_attr(
             feature="resource",
-            ensures(result == Ok(()) ==> resource(TokenApproval(id), 1))
+            ensures(implies!(result == Ok(()), resource(TokenApproval(id), 1)))
         )]
+        // APPROVE_RESOURCE_SPEC_END
+        // APPROVE_SPEC_START
         #[cfg_attr(
             not(feature="resource"),
-            ensures(forall(|tokenId: TokenId| tokenId != id ==>
-                self.token_approvals.get(tokenId) == old(self.token_approvals.get(tokenId))
+            ensures(forall(|tokenId: TokenId| implies!(tokenId != id,
+                self.token_approvals.get(tokenId) == old(self.token_approvals.get(tokenId)))
             )),
             ensures(forall(|a: AccountId| self.balance_of(a) == old(self.balance_of(a)))),
-            ensures(self.get_operator_approvals() === old(self.get_operator_approvals())),
-            ensures(self.get_owned_tokens_count() === old(self.get_owned_tokens_count()))
+            ensures(self.get_operator_approvals() == old(self.get_operator_approvals())),
+            ensures(self.get_owned_tokens_count() == old(self.get_owned_tokens_count()))
         )]
-        #[ensures(result == Ok(()) ==> self.token_approvals.get(id) == Some(to))]
+        // APPROVE_SPEC_END
+        // APPROVE_COMMON_SPEC_START
+        #[ensures(implies!(result == Ok(()), self.token_approvals.get(id) == Some(to)))]
+        // APPROVE_COMMON_SPEC_END
         #[ensures(result != Ok(()) ==> self.snap() === old(self.snap()))]
         pub fn approve(&mut self, to: AccountId, id: TokenId) -> Result<(), Error> {
             self.approve_for(to, id)
         }
 
         /// Transfers the token from the caller to the given destination.
+        // TRANSFER_RESOURCE_SPEC_START
         #[cfg_attr(feature="resource",
             requires(
-                (self.token_owner.get(id) == Some(self.env.caller()) && to != 0) ==>
+                implies!(self.token_owner.get(id) == Some(self.env.caller()) && to != 0,
                     resource(OwnershipOf(id), 1) &&
                     resource(OwnedTokens(self.env.caller()), 1) &&
-                    (self.get_approved(id) != None ==>
+                    implies!(self.get_approved(id) != None,
                         resource(TokenApproval(id), 1))
+                )
             ),
-            ensures(result == Ok(()) ==> resource(OwnershipOf(id), 1)),
-            ensures(result == Ok(()) ==> resource(OwnedTokens(to), 1))
+            ensures(implies!(result == Ok(()), resource(OwnershipOf(id), 1))),
+            ensures(implies!(result == Ok(()), resource(OwnedTokens(to), 1)))
         )]
+        // TRANSFER_RESOURCE_SPEC_END
+        // TRANSFER_SPEC_START
         #[cfg_attr(not(feature="resource"),
-            ensures(forall(|t: TokenId| t != id ==>
+            ensures(forall(|t: TokenId| implies!(t != id,
                 self.get_approved(t) == old(self.get_approved(t)) &&
                 self.owner_of(t) == old(self.owner_of(t))
-            )),
-            ensures(result == Ok(()) ==> forall(|a: AccountId|
+            ))),
+            ensures(implies!(result == Ok(()), forall(|a: AccountId|
                 self.balance_of(a) == if(a == self.env.caller() && self.env.caller() != to) {
                     old(self.balance_of(a)) - 1
                 } else if (a == to && self.env.caller() != to) {
@@ -442,20 +468,17 @@ mod erc721 {
                 } else {
                     old(self.balance_of(a))
                 }
-            ))
+            )))
         )]
-        #[ensures(result == Ok(()) ==> self.token_owner.get(id) == Some(to))]
-        #[ensures(result == Ok(()) ==> self.get_approved(id) == None)]
+        // TRANSFER_SPEC_END
+        // TRANSFER_COMMON_SPEC_START
+        #[ensures(implies!(result == Ok(()), self.token_owner.get(id) == Some(to)))]
+        #[ensures(implies!(result == Ok(()), self.get_approved(id) == None))]
+        // TRANSFER_COMMON_SPEC_END
         #[ensures(result != Ok(()) ==> self.snap() === old(self.snap()))]
-        pub fn transfer(
-            &mut self,
-            to: AccountId,
-            id: TokenId,
-        ) -> Result<(), Error> {
+        pub fn transfer(&mut self, to: AccountId, id: TokenId) -> Result<(), Error> {
             let caller = self.env.caller();
-            if {
-                self.token_owner.get(id) == Some(caller) && to != 0
-            } {
+            if self.token_owner.get(id) == Some(caller) && to != 0 {
                 prusti_assert!(self.can_transfer(caller, id, to));
             }
             self.transfer_token_from(caller, to, id)
@@ -472,24 +495,28 @@ mod erc721 {
         }
 
         /// Transfer approved or owned token.
+        // TRANSFER_FROM_RESOURCE_SPEC_START
         #[cfg_attr(feature="resource",
             requires(
-                self.token_owner.get(id) == Some(from) &&
-                self.can_transfer(self.env.caller(), id, to)
-                ==> (
+                implies!(self.token_owner.get(id) == Some(from) &&
+                self.can_transfer(self.env.caller(), id, to),
+                    (
                     resource(OwnershipOf(id), 1)) &&
                     resource(OwnedTokens(from), 1) &&
-                    ((self.get_approved(id) != None) ==> resource(TokenApproval(id), 1))
-                ),
-            ensures(result == Ok(()) ==> resource(OwnershipOf(id), 1)),
-            ensures(result == Ok(()) ==> resource(OwnedTokens(to), 1))
+                    implies!(self.get_approved(id) != None, resource(TokenApproval(id), 1))
+                )
+            ),
+            ensures(implies!(result == Ok(()), resource(OwnershipOf(id), 1))),
+            ensures(implies!(result == Ok(()), resource(OwnedTokens(to), 1)))
         )]
+        // TRANSFER_FROM_RESOURCE_SPEC_END
+        // TRANSFER_FROM_SPEC_START
         #[cfg_attr(not(feature="resource"),
-            ensures(forall(|t: TokenId| t != id ==>
+            ensures(forall(|t: TokenId| implies!(t != id,
                 self.get_approved(t) == old(self.get_approved(t)) &&
                 self.owner_of(t) == old(self.owner_of(t))
-            )),
-            ensures(result == Ok(()) ==> forall(|a: AccountId|
+            ))),
+            ensures(implies!(result == Ok(()), forall(|a: AccountId|
                 self.balance_of(a) == if(a == from && from != to) {
                     old(self.balance_of(a)) - 1
                 } else if (a == to && from != to) {
@@ -497,10 +524,13 @@ mod erc721 {
                 } else {
                     old(self.balance_of(a))
                 }
-            ))
+            )))
         )]
-        #[ensures(result == Ok(()) ==> self.token_owner.get(id) == Some(to))]
-        #[ensures(result == Ok(()) ==> self.get_approved(id) == None)]
+        // TRANSFER_FROM_SPEC_END
+        // TRANSFER_FROM_COMMON_SPEC_START
+        #[ensures(implies!(result == Ok(()), self.token_owner.get(id) == Some(to)))]
+        #[ensures(implies!(result == Ok(()), self.get_approved(id) == None))]
+        // TRANSFER_FROM_COMMON_SPEC_END
         #[ensures(result != Ok(()) ==> self.snap() === old(self.snap()))]
         pub fn transfer_from(
             &mut self,
@@ -512,28 +542,34 @@ mod erc721 {
         }
 
         /// Creates a new token.
+        // MINT_RESOURCE_SPEC_START
         #[cfg_attr(feature="resource",
-            ensures(result == Ok(()) ==> resource(OwnershipOf(id), 1)),
-            ensures(result == Ok(()) ==> resource(OwnedTokens(self.env.caller()), 1))
+            ensures(implies!(result == Ok(()), resource(OwnershipOf(id), 1))),
+            ensures(implies!(result == Ok(()), resource(OwnedTokens(self.env.caller()), 1)))
         )]
-        #[ensures(result == Ok(()) ==> self.token_owner.get(id) == Some(self.env.caller()))]
-        #[ensures(self.env.caller() != 0 && !old(self.token_owner.contains(id)) <==> result == Ok(()))]
+        // MINT_RESOURCE_SPEC_END
+        // MINT_SPEC_START
         #[cfg_attr(not(feature="resource"),
-            ensures(self.get_token_approvals() === old(self.get_token_approvals())),
-            ensures(self.get_operator_approvals() === old(self.get_operator_approvals())),
-            ensures(forall(|t: TokenId| t != id ==> self.token_owner.get(t) == old(self.token_owner.get(t)))),
-            ensures(result == Ok(()) ==> forall(|a: AccountId|
+            ensures(self.get_token_approvals() == old(self.get_token_approvals())),
+            ensures(self.get_operator_approvals() == old(self.get_operator_approvals())),
+            ensures(forall(|t: TokenId| implies!(t != id, self.token_owner.get(t) == old(self.token_owner.get(t))))),
+            ensures(implies!(result == Ok(()), forall(|a: AccountId|
                 self.balance_of(a) == if(a == self.env.caller()) {
                     old(self.balance_of(a)) + 1
                 } else {
                     old(self.balance_of(a))
                 }
-            ))
+            )))
         )]
+        // MINT_SPEC_END
+        // MINT_COMMON_SPEC_START
+        #[ensures(implies!(result == Ok(()), self.token_owner.get(id) == Some(self.env.caller())))]
+        // MINT_COMMON_SPEC_END
         #[ensures(
             old(self.owner_of(id) == None) && self.env.caller() != 0 ==>
                 matches!(result, Ok(()))
         )]
+        #[ensures(self.env.caller() != 0 && !old(self.token_owner.contains(id)) <==> result == Ok(()))]
         #[ensures(result != Ok(()) ==> self.snap() === old(self.snap()))]
         pub fn mint(&mut self, id: TokenId) -> Result<(), Error> {
             let caller = self.env.caller();
@@ -541,34 +577,42 @@ mod erc721 {
         }
 
         /// Deletes an existing token. Only the owner can burn the token.
+        // BURN_RESOURCE_SPEC_START
         #[cfg_attr(feature="resource",
             requires(
-                self.owner_of(id) == Some(self.env.caller()) ==>
+                implies!(self.owner_of(id) == Some(self.env.caller()),
                     resource(OwnershipOf(id), 1) &&
                     resource(OwnedTokens(self.env.caller()), 1)
+                )
             )
-            // requires(
-            //     self.owner_of(id) == Some(self.env.caller()) ==>
-            //         resource(OwnedTokens(self.env.caller()), 1)
-            // )
         )]
+        // BURN_RESOURCE_SPEC_END
+        // BURN_SPEC_START
         #[cfg_attr(not(feature="resource"),
-            ensures(self.get_token_approvals() === old(self.get_token_approvals())),
-            ensures(self.get_operator_approvals() === old(self.get_operator_approvals())),
-            ensures(forall(|t: TokenId| t != id ==> self.token_owner.get(t) == old(self.token_owner.get(t)))),
-            ensures(result == Ok(()) ==> forall(|a: AccountId|
-                self.balance_of(a) == if(a == from) {
+            ensures(self.get_token_approvals() == old(self.get_token_approvals())),
+            ensures(self.get_operator_approvals() == old(self.get_operator_approvals())),
+            ensures(forall(|t: TokenId| implies!(t != id, self.token_owner.get(t) == old(self.token_owner.get(t))))),
+            ensures(implies!(result == Ok(()), forall(|a: AccountId|
+                self.balance_of(a) == if(a == self.env.caller()) {
                     old(self.balance_of(a)) - 1
                 } else {
                     old(self.balance_of(a))
                 }
-            ))
+            )))
         )]
-        #[ensures(result == Ok(()) ==> self.owner_of(id) == None)]
+        // BURN_SPEC_END
+        // BURN_COMMON_SPEC_START
+        #[ensures(implies!(result == Ok(()), self.owner_of(id) == None))]
+        // BURN_COMMON_SPEC_END
         pub fn burn(&mut self, id: TokenId) -> Result<(), Error> {
             let caller = self.env.caller();
-            prusti_assert!(forall(|a: AccountId| self.balance_of(a) == self.computed_balance(a)));
-            prusti_assert!(self.balance_of(caller) == self.token_owner.num_entries_with_value(caller));
+            prusti_assert!(forall(
+                |a: AccountId| self.balance_of(a) == self.computed_balance(a)
+            ));
+            prusti_assert!(
+                self.balance_of(caller)
+                    == self.token_owner.num_entries_with_value(caller)
+            );
 
             let Self {
                 token_owner,
@@ -579,22 +623,22 @@ mod erc721 {
             let owner = token_owner.get(id);
             let owner = match owner {
                 Some(owner) => owner,
-                None => {
-                    return Err(Error::TokenNotFound)
-                }
+                None => return Err(Error::TokenNotFound),
             };
             if owner != caller {
                 return Err(Error::NotOwner);
             };
-            prusti_assert!(owned_tokens_count.get(caller).unwrap_or(0) ==
-                token_owner.num_entries_with_value(caller));
-            prusti_assert!(token_owner.num_entries_with_value(caller) ==
-                token_owner.as_removed(id).num_entries_with_value(caller) +
-                1
+            prusti_assert!(
+                owned_tokens_count.get(caller).unwrap_or(0)
+                    == token_owner.num_entries_with_value(caller)
             );
-            prusti_assert!(owned_tokens_count.get(caller).unwrap_or(0) ==
-                token_owner.as_removed(id).num_entries_with_value(caller) +
-                1
+            prusti_assert!(
+                token_owner.num_entries_with_value(caller)
+                    == token_owner.as_removed(id).num_entries_with_value(caller) + 1
+            );
+            prusti_assert!(
+                owned_tokens_count.get(caller).unwrap_or(0)
+                    == token_owner.as_removed(id).num_entries_with_value(caller) + 1
             );
 
             let count = owned_tokens_count.get(caller);
@@ -605,15 +649,20 @@ mod erc721 {
                 }
             };
 
-            #[cfg(feature="resource")] {
+            #[cfg(feature = "resource")]
+            // BURN_RESOURCE_SPEC_START
+            {
                 consume!(resource(OwnershipOf(id), 1));
                 consume!(resource(OwnedTokens(caller), 1));
             }
+            // BURN_RESOURCE_SPEC_END
             let count = count - 1;
 
             owned_tokens_count.insert(caller, count);
             token_owner.remove(id);
-            prusti_assert!(self.balance_of(caller) == old(self.balance_of(self.env().caller())) - 1);
+            prusti_assert!(
+                self.balance_of(caller) == old(self.balance_of(self.env().caller())) - 1
+            );
             prusti_assert!(self.balance_of(caller) == self.computed_balance(caller));
             prusti_assert!(
                 forall(|a: AccountId| a != caller ==>
@@ -630,25 +679,28 @@ mod erc721 {
             Ok(())
         }
 
+        // TRANSFER_TOKEN_FROM_RESOURCE_SPEC_START
         #[cfg_attr(feature="resource",
             requires(
-                (self.owner_of(id) == Some(from) && self.can_transfer(self.env.caller(), id, to)) ==>
-                resource(OwnershipOf(id), 1) && resource(OwnedTokens(from), 1)),
+                implies!(self.owner_of(id) == Some(from) && self.can_transfer(self.env.caller(), id, to),
+                resource(OwnershipOf(id), 1) && resource(OwnedTokens(from), 1))),
             requires(
-                        (self.owner_of(id) == Some(from) &&
+                implies!(self.owner_of(id) == Some(from) &&
                         self.can_transfer(self.env.caller(), id, to) &&
-                        self.get_approved(id) != None) ==> resource(TokenApproval(
+                        self.get_approved(id) != None, resource(TokenApproval(
                         id
-                    ), 1)),
-            ensures(result == Ok(()) ==> resource(OwnershipOf(id), 1)),
-            ensures(result == Ok(()) ==> resource(OwnedTokens(to), 1))
+                    ), 1))),
+            ensures(implies!(result == Ok(()), resource(OwnershipOf(id), 1))),
+            ensures(implies!(result == Ok(()), resource(OwnedTokens(to), 1)))
         )]
+        // TRANSFER_TOKEN_FROM_RESOURCE_SPEC_END
+        // TRANSFER_TOKEN_FROM_SPEC_START
         #[cfg_attr(not(feature="resource"),
-            ensures(forall(|t: TokenId| t != id ==>
+            ensures(forall(|t: TokenId| implies!(t != id,
                 self.get_approved(t) == old(self.get_approved(t)) &&
                 self.owner_of(t) == old(self.owner_of(t))
-            )),
-            ensures(result == Ok(()) ==> forall(|a: AccountId|
+            ))),
+            ensures(implies!(result == Ok(()), forall(|a: AccountId|
                 self.balance_of(a) == if(a == from && from != to) {
                     old(self.balance_of(a)) - 1
                 } else if (a == to && from != to) {
@@ -656,10 +708,13 @@ mod erc721 {
                 } else {
                     old(self.balance_of(a))
                 }
-            ))
+            )))
         )]
-        #[ensures(result == Ok(()) ==> self.token_owner.get(id) == Some(to))]
-        #[ensures(result == Ok(()) ==> self.get_approved(id) == None)]
+        // TRANSFER_TOKEN_FROM_SPEC_END
+        // TRANSFER_TOKEN_FROM_COMMON_SPEC_START
+        #[ensures(implies!(result == Ok(()), self.token_owner.get(id) == Some(to)))]
+        #[ensures(implies!(result == Ok(()), self.get_approved(id) == None))]
+        // TRANSFER_TOKEN_FROM_COMMON_SPEC_END
         #[ensures(result != Ok(()) ==> self.snap() === old(self.snap()))]
         fn transfer_token_from(
             &mut self,
@@ -694,15 +749,20 @@ mod erc721 {
         }
 
         /// Removes token `id` from the owner.
+        // REMOVE_TOKEN_FROM_COMMON_SPEC_START
         #[requires(self.owner_of(id) == Some(from))]
-        #[cfg_attr(feature="resource",
+        // REMOVE_TOKEN_FROM_COMMON_SPEC_END
+        // REMOVE_TOKEN_FROM_RESOURCE_SPEC_START
+        #[cfg_attr(feature = "resource",
             requires(resource(OwnershipOf(id), 1)),
             requires(resource(OwnedTokens(from), 1))
         )]
+        // REMOVE_TOKEN_FROM_RESOURCE_SPEC_END
+        // REMOVE_TOKEN_FROM_SPEC_START
         #[cfg_attr(not(feature="resource"),
-            ensures(self.get_token_approvals() === old(self.get_token_approvals())),
-            ensures(self.get_operator_approvals() === old(self.get_operator_approvals())),
-            ensures(forall(|t: TokenId| t != id ==> self.token_owner.get(t) == old(self.token_owner.get(t)))),
+            ensures(self.get_token_approvals() == old(self.get_token_approvals())),
+            ensures(self.get_operator_approvals() == old(self.get_operator_approvals())),
+            ensures(forall(|t: TokenId| implies!(t != id, self.token_owner.get(t) == old(self.token_owner.get(t))))),
             ensures(forall(|a: AccountId|
                 self.balance_of(a) == if(a == from) {
                     old(self.balance_of(a)) - 1
@@ -711,20 +771,18 @@ mod erc721 {
                 }
             ))
         )]
+        // REMOVE_TOKEN_FROM_SPEC_END
+        // REMOVE_TOKEN_FROM_COMMON_SPEC_START
         #[ensures(self.owner_of(id) == None)]
+        // REMOVE_TOKEN_FROM_COMMON_SPEC_END
         #[ensures(matches!(result, Ok(())))]
         fn remove_token_from(
             &mut self,
             from: AccountId,
             id: TokenId,
         ) -> Result<(), Error> {
-
-            prusti_assert!(
-                self.token_owner.num_entries_with_value(from) > 0
-            );
-            prusti_assert!(
-                self.balance_of(from) > 0
-            );
+            prusti_assert!(self.token_owner.num_entries_with_value(from) > 0);
+            prusti_assert!(self.balance_of(from) > 0);
 
             let Self {
                 token_owner,
@@ -746,24 +804,30 @@ mod erc721 {
         }
 
         /// Adds the token `id` to the `to` AccountID.
+        // ADD_TOKEN_TO_RESOURCE_SPEC_START
         #[cfg_attr(feature="resource",
-            ensures(result == Ok(()) ==> resource(OwnershipOf(id), 1)),
-            ensures(result == Ok(()) ==> resource(OwnedTokens(to), 1))
+            ensures(implies!(result == Ok(()), resource(OwnershipOf(id), 1))),
+            ensures(implies!(result == Ok(()), resource(OwnedTokens(to), 1)))
         )]
-        #[ensures(result == Ok(()) ==> self.token_owner.get(id) == Some(to))]
-        #[ensures(to != 0 && !old(self.token_owner.contains(id)) <==> result == Ok(()))]
+        // ADD_TOKEN_TO_RESOURCE_SPEC_END
+        // ADD_TOKEN_TO_SPEC_START
         #[cfg_attr(not(feature="resource"),
-            ensures(self.get_token_approvals() === old(self.get_token_approvals())),
-            ensures(self.get_operator_approvals() === old(self.get_operator_approvals())),
-            ensures(forall(|t: TokenId| t != id ==> self.token_owner.get(t) == old(self.token_owner.get(t)))),
-            ensures(result == Ok(()) ==> forall(|a: AccountId|
+            ensures(self.get_token_approvals() == old(self.get_token_approvals())),
+            ensures(self.get_operator_approvals() == old(self.get_operator_approvals())),
+            ensures(forall(|t: TokenId| implies!(t != id, self.token_owner.get(t) == old(self.token_owner.get(t))))),
+            ensures(implies!(result == Ok(()), forall(|a: AccountId|
                 self.balance_of(a) == if(a == to) {
                     old(self.balance_of(a)) + 1
                 } else {
                     old(self.balance_of(a))
                 }
-            ))
+            )))
         )]
+        // ADD_TOKEN_TO_SPEC_END
+        // ADD_TOKEN_TO_COMMON_SPEC_START
+        #[ensures(implies!(result == Ok(()), self.token_owner.get(id) == Some(to)))]
+        // ADD_TOKEN_TO_COMMON_SPEC_END
+        #[ensures(to != 0 && !old(self.token_owner.contains(id)) <==> result == Ok(()))]
         #[ensures(
             old(self.owner_of(id) == None) && to != 0 ==>
                 matches!(result, Ok(()))
@@ -790,28 +854,37 @@ mod erc721 {
             owned_tokens_count.insert(to, count);
             token_owner.insert(id, to);
 
-            #[cfg(feature="resource")] {
+            #[cfg(feature = "resource")]
+            {
+                // ADD_TOKEN_TO_RESOURCE_SPEC_START
                 produce!(resource(OwnershipOf(id), 1));
                 produce!(resource(OwnedTokens(to), 1));
+                // ADD_TOKEN_TO_RESOURCE_SPEC_END
             }
 
             Ok(())
         }
 
         /// Approves or disapproves the operator to transfer all tokens of the caller.
+        // APPROVE_FOR_ALL_RESOURCE_SPEC_START
         #[cfg_attr(feature="resource",
-            requires(to != self.env.caller() ==> resource(AccountApproval(self.env.caller(), to), 1)))]
+            requires(implies!(to != self.env.caller(), resource(AccountApproval(self.env.caller(), to), 1))))]
+        // APPROVE_FOR_ALL_RESOURCE_SPEC_END
+        // APPROVE_FOR_ALL_SPEC_START
         #[cfg_attr(not(feature="resource"),
             ensures(forall(|a1: AccountId, a2: AccountId|
-                (a1 != self.env().caller() && a2 != to) ==>
+                implies!(a1 != self.env().caller() && a2 != to,
                 self.approved_for_all(a1, a2) == old(self.approved_for_all(a1, a2))
-            )),
-            ensures(self.get_owned_tokens_count() === old(self.get_owned_tokens_count())),
+            ))),
+            ensures(self.get_owned_tokens_count() == old(self.get_owned_tokens_count())),
             ensures(forall(|a: AccountId| self.balance_of(a) == old(self.balance_of(a)))),
-            ensures(self.get_token_approvals() === old(self.get_token_approvals()))
+            ensures(self.get_token_approvals() == old(self.get_token_approvals()))
         )]
+        // APPROVE_FOR_ALL_SPEC_END
+        // APPROVE_FOR_ALL_COMMON_SPEC_START
+        #[ensures(implies!(result == Ok(()), self.approved_for_all(self.env.caller(), to) == approved))]
+        // APPROVE_FOR_ALL_COMMON_SPEC_END
         #[ensures(result == Ok(()) <==> to != self.env.caller())]
-        #[ensures(result == Ok(()) ==> self.approved_for_all(self.env.caller(), to) == approved)]
         #[ensures(result != Ok(()) ==> self.snap() === old(self.snap()))]
         fn approve_for_all(
             &mut self,
@@ -839,20 +912,26 @@ mod erc721 {
 
         /// Approve the passed `AccountId` to transfer the specified token on behalf of
         /// the message's sender.
+        // APPROVE_FOR_RESOURCE_SPEC_START
         #[cfg_attr(
             feature="resource",
-            ensures(result == Ok(()) ==> resource(TokenApproval(id), 1))
+            ensures(implies!(result == Ok(()), resource(TokenApproval(id), 1)))
         )]
+        // APPROVE_FOR_RESOURCE_SPEC_END
+        // APPROVE_FOR_SPEC_START
         #[cfg_attr(
             not(feature="resource"),
-            ensures(forall(|tokenId: TokenId| tokenId != id ==>
+            ensures(forall(|tokenId: TokenId| implies!(tokenId != id,
                 self.token_approvals.get(tokenId) == old(self.token_approvals.get(tokenId))
-            )),
+            ))),
             ensures(forall(|a: AccountId| self.balance_of(a) == old(self.balance_of(a)))),
-            ensures(self.get_operator_approvals() === old(self.get_operator_approvals())),
-            ensures(self.get_owned_tokens_count() === old(self.get_owned_tokens_count()))
+            ensures(self.get_operator_approvals() == old(self.get_operator_approvals())),
+            ensures(self.get_owned_tokens_count() == old(self.get_owned_tokens_count()))
         )]
-        #[ensures(result == Ok(()) ==> self.token_approvals.get(id) == Some(to))]
+        // APPROVE_FOR_SPEC_END
+        // APPROVE_FOR_COMMON_SPEC_START
+        #[ensures(implies!(result == Ok(()), self.token_approvals.get(id) == Some(to)))]
+        // APPROVE_FOR_COMMON_SPEC_END
         #[ensures(result != Ok(()) ==> self.snap() === old(self.snap()))]
         fn approve_for(&mut self, to: AccountId, id: TokenId) -> Result<(), Error> {
             let caller = self.env.caller();
@@ -863,7 +942,7 @@ mod erc721 {
                 }
             };
             if !(owner == caller || self.approved_for_all(owner, caller)) {
-                return Err(Error::NotAllowed)
+                return Err(Error::NotAllowed);
             };
 
             if to == 0 {
@@ -876,25 +955,32 @@ mod erc721 {
                 self.token_approvals.insert(id, to);
             }
 
-            #[cfg(feature="resource")]
+            #[cfg(feature = "resource")]
+            // APPROVE_FOR_RESOURCE_SPEC_START
             produce!(resource(TokenApproval(id), 1));
+            // APPROVE_FOR_RESOURCE_SPEC_END
 
             Ok(())
         }
 
         /// Removes existing approval from token `id`.
+        // CLEAR_APPROVAL_RESOURCE_SPEC_START
         #[cfg_attr(feature="resource",
-            requires(!matches!(self.get_approved(id), None) ==> resource(TokenApproval(id), 1))
+            requires(implies!(self.get_approved(id) != None, resource(TokenApproval(id), 1)))
         )]
-        #[ensures(matches!(self.get_approved(id), None))]
-        #[ensures(self.get_approved(id) == None)]
+        // CLEAR_APPROVAL_RESOURCE_SPEC_END
+        // CLEAR_APPROVAL_SPEC_START
         #[cfg_attr(not(feature="resource"),
-            ensures(self.get_token_owner() === old(self.get_token_owner())),
+            ensures(self.get_token_owner() == old(self.get_token_owner())),
             ensures(forall(|a: AccountId| self.balance_of(a) == old(self.balance_of(a)))),
-            ensures(self.get_owned_tokens_count() === old(self.get_owned_tokens_count())),
-            ensures(self.get_operator_approvals() === old(self.get_operator_approvals())),
-            ensures(forall(|t: TokenId| t != id ==> self.get_approved(t) == old(self.get_approved(t))))
-        )]
+            ensures(self.get_owned_tokens_count() == old(self.get_owned_tokens_count())),
+            ensures(self.get_operator_approvals() == old(self.get_operator_approvals())),
+            ensures(forall(|t: TokenId| implies!(t != id, self.get_approved(t) == old(self.get_approved(t))))
+        ))]
+        // CLEAR_APPROVAL_SPEC_END
+        // CLEAR_APPROVAL_COMMON_SPEC_START
+        #[ensures(self.get_approved(id) == None)]
+        // CLEAR_APPROVAL_COMMON_SPEC_END
         fn clear_approval(&mut self, id: TokenId) {
             self.token_approvals.remove(id);
         }
@@ -918,12 +1004,9 @@ mod erc721 {
         #[requires(matches!(self.owner_of(id), Some(_)))]
         fn approved_or_owner(&self, from: AccountId, id: TokenId) -> bool {
             let owner = self.owner_of(id);
-                Some(from) == owner
-                    || Some(from) == self.token_approvals.get(id)
-                    || self.approved_for_all(
-                        owner.unwrap(),
-                        from,
-                    )
+            Some(from) == owner
+                || Some(from) == self.token_approvals.get(id)
+                || self.approved_for_all(owner.unwrap(), from)
         }
 
         /// Returns true if token `id` exists or false if it does not.
